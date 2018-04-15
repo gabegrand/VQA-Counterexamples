@@ -22,7 +22,7 @@ parser = argparse.ArgumentParser(
     formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 ##################################################
 # yaml options file contains all default choices #
-parser.add_argument('--path_opt', default='options/vqa/default.yaml', type=str, 
+parser.add_argument('--path_opt', default='options/vqa/default.yaml', type=str,
                     help='path to a yaml options file')
 ################################################
 # change cli options to modify default choices #
@@ -46,7 +46,7 @@ parser.add_argument('-b', '--batch_size', type=int,
                     help='mini-batch size')
 parser.add_argument('--epochs', type=int,
                     help='number of total epochs to run')
-# options not in yaml file          
+# options not in yaml file
 parser.add_argument('--start_epoch', default=0, type=int,
                     help='manual epoch number (useful on restarts)')
 parser.add_argument('--resume', default='', type=str,
@@ -120,7 +120,7 @@ def main():
                                     options['vgenome'])
     train_loader = trainset.data_loader(batch_size=options['optim']['batch_size'],
                                         num_workers=args.workers,
-                                        shuffle=True)                                      
+                                        shuffle=True)
 
     if options['vqa']['trainsplit'] == 'train':
         valset = datasets.factory_VQA('val', options['vqa'], options['coco'])
@@ -131,18 +131,18 @@ def main():
         testset = datasets.factory_VQA('test', options['vqa'], options['coco'])
         test_loader = testset.data_loader(batch_size=options['optim']['batch_size'],
                                           num_workers=args.workers)
-    
+
     #########################################################################################
     # Create model, criterion and optimizer
     #########################################################################################
-    
+
     model = models.factory(options['model'],
                            trainset.vocab_words(), trainset.vocab_answers(),
                            cuda=True, data_parallel=True)
     criterion = criterions.factory(options['vqa'], cuda=True)
     optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()),
                             options['optim']['lr'])
-    
+
     #########################################################################################
     # args.resume: resume from a checkpoint OR create logs directory
     #########################################################################################
@@ -167,7 +167,7 @@ def main():
             yaml.dump(options, f, default_flow_style=False)
         with open(path_args, 'w') as f:
             yaml.dump(vars(args), f, default_flow_style=False)
-        
+
     if exp_logger is None:
         # Set loggers
         exp_name = os.path.basename(options['logs']['dir_logs']) # add timestamp
@@ -193,7 +193,7 @@ def main():
             exp_logger.to_json(path_logger_json)
             save_results(val_results, args.start_epoch, valset.split_name(),
                          options['logs']['dir_logs'], options['vqa']['dir'])
-        
+
         test_results, testdev_results = engine.test(test_loader, model, exp_logger,
                                                     args.start_epoch, args.print_freq)
         # save results and DOES NOT compute OpenEnd accuracy
@@ -212,9 +212,9 @@ def main():
         #adjust_learning_rate(optimizer, epoch)
 
         # train for one epoch
-        engine.train(train_loader, model, criterion, optimizer, 
+        engine.train(train_loader, model, criterion, optimizer,
                      exp_logger, epoch, args.print_freq)
-        
+
         if options['vqa']['trainsplit'] == 'train':
             # evaluate on validation set
             acc1, val_results = engine.validate(val_loader, model, criterion,
@@ -260,9 +260,9 @@ def main():
                          options['logs']['dir_logs'], options['vqa']['dir'])
             save_results(testdev_results, epoch, testset.split_name(testdev=True),
                          options['logs']['dir_logs'], options['vqa']['dir'])
-    
 
-def make_meters():  
+
+def make_meters():
     meters_dict = {
         'loss': logger.AvgMeter(),
         'acc1': logger.AvgMeter(),

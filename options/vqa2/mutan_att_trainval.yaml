@@ -3,7 +3,8 @@ logs:
 vqa:
     dataset: VQA2
     dir: data/vqa2
-    trainsplit: trainval
+    # trainsplit: trainval
+    trainsplit: train
     nans: 2000
     maxlength: 26
     minwcount: 0
@@ -11,7 +12,8 @@ vqa:
     pad: right
     samplingans: True
 coco:
-    dir: /local/cadene/data/coco
+    # dir: /local/cadene/data/coco
+    dir: data/coco
     arch: fbresnet152
     mode: att
     size: 448
@@ -21,7 +23,8 @@ model:
     dim_q: 2400
     seq2vec:
         arch: skipthoughts
-        dir_st: /local/cadene/data/skip-thoughts
+        # dir_st: /local/cadene/data/skip-thoughts
+        dir_st: data/skip-thoughts
         type: BayesianUniSkip
         dropout: 0.25
         fixed_emb: False

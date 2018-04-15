@@ -82,7 +82,7 @@ class AbstractAtt(nn.Module):
         x_att = x_att.view(batch_size,
                            width,
                            height,
-                           self.opt['attention']['dim_mm']) 
+                           self.opt['attention']['dim_mm'])
         x_att = x_att.transpose(2,3).transpose(1,2)
         x_att = self.conv_att(x_att)
         x_att = x_att.view(batch_size,
@@ -158,8 +158,11 @@ class AbstractAtt(nn.Module):
 
         x_q_vec = self.seq2vec(input_q)
         list_v_att = self._attention(input_v, x_q_vec)
+        print(len(list_v_att), list_v_att[0].size())
         x = self._fusion_glimpses(list_v_att, x_q_vec)
+        print(x.size())
         x = self._classif(x)
+        print(x.size())
         return x
 
 
