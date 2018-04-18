@@ -25,7 +25,7 @@ class AbstractVQA(AbstractVQADataset):
         assert 'samplingans' in self.opt, \
                "opt['vqa'] does not have 'samplingans' "\
                "entry. Set it to True or False."
-  
+
         if self.data_split == 'test':
             path_testdevset = os.path.join(self.subdir_processed, 'testdevset.pickle')
             with open(path_testdevset, 'rb') as handle:
@@ -53,7 +53,8 @@ class AbstractVQA(AbstractVQADataset):
         if self.dataset_img is not None:
             item_img = self.dataset_img.get_by_name(item_vqa['image_name'])
             item['visual'] = item_img['visual']
-        
+            item['image_name'] = item_vqa['image_name']
+
         # Process Question (word token)
         item['question_id'] = item_vqa['question_id']
         item['question'] = torch.LongTensor(item_vqa['question_wids'])
@@ -90,7 +91,7 @@ class AbstractVQA(AbstractVQADataset):
         return DataLoader(self,
             batch_size=batch_size, shuffle=shuffle,
             num_workers=num_workers, pin_memory=True)
- 
+
     def split_name(self, testdev=False):
         if testdev:
             return 'test-dev2015'
@@ -102,7 +103,7 @@ class AbstractVQA(AbstractVQADataset):
             return 'test-dev2015'
         else:
             assert False, 'Wrong data_split: {}'.format(self.data_split)
- 
+
     def subdir_processed(self):
         subdir = 'nans,' + str(self.opt['nans']) \
               + '_maxlength,' + str(self.opt['maxlength']) \
@@ -213,7 +214,7 @@ class VQAVisualGenome(data.Dataset):
         self.dataset_vgenome.dataset = data_vg_new
         print('-> {} items left in visual genome'.format(len(self.dataset_vgenome)))
         print('-> {} items total in vqa+vg'.format(len(self)))
-                
+
 
     def __getitem__(self, index):
         if index < len(self.dataset_vqa):
@@ -264,4 +265,3 @@ def factory(data_split, opt, opt_coco=None, opt_vgenome=None):
         return VQAVisualGenome(dataset_vqa, dataset_vgenome)
     else:
         return dataset_vqa
-
