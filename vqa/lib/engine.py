@@ -1,5 +1,6 @@
 import time
 import torch
+from tqdm import tqdm
 from torch.autograd import Variable
 import vqa.lib.utils as utils
 
@@ -9,7 +10,8 @@ def train(loader, model, criterion, optimizer, logger, epoch, print_freq=10):
     meters = logger.reset_meters('train')
 
     end = time.time()
-    for i, sample in enumerate(loader):
+    for i, sample in tqdm(enumerate(loader)):
+
         batch_size = sample['visual'].size(0)
 
         # measure data loading time
@@ -25,7 +27,7 @@ def train(loader, model, criterion, optimizer, logger, epoch, print_freq=10):
         loss = criterion(output, target_answer)
         meters['loss'].update(loss.data[0], n=batch_size)
 
-        # measure accuracy 
+        # measure accuracy
         acc1, acc5 = utils.accuracy(output.data, target_answer.data, topk=(1, 5))
         meters['acc1'].update(acc1[0], n=batch_size)
         meters['acc5'].update(acc5[0], n=batch_size)
