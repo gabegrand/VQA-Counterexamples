@@ -22,13 +22,45 @@ import vqa.lib.criterions as criterions
 import vqa.datasets as datasets
 import vqa.models as models
 
+
+parser = argparse.ArgumentParser()
+
+parser.add_argument('--path_opt', default='options/vqa2/counterexamples_default.yaml',
+                    type=str, help='path to a yaml options file')
+
+parser.add_argument('-lr', '--learning_rate', type=float,
+                    help='initial learning rate')
+parser.add_argument('-b', '--batch_size', type=int,
+                    help='mini-batch size')
+parser.add_argument('--epochs', type=int,
+                    help='number of total epochs to run')
+
 def main():
 
-    with open('options/vqa2/mutan_noatt_train_cex.yaml', 'r') as handle:
-        options = yaml.load(handle)
+    args = parser.parse_args()
+
+    #########################################################################################
+    # Create options
+    #########################################################################################
+
+    options = {
+        'optim': {
+            'lr': args.learning_rate,
+            'batch_size': args.batch_size,
+            'epochs': args.epochs
+        }
+    }
+
+    with open(args.path_opt, 'r') as handle:
+        options_yaml = yaml.load(handle)
+    options = utils.update_values(options, options_yaml)
     options['vgenome'] = None
 
-    print("=> Loading VQA dataset...")
+    #########################################################################################
+    # Create datasets
+    #########################################################################################
+
+    print('=> Loading VQA dataset...')
     trainset = datasets.factory_VQA(options['vqa']['trainsplit'],
                                     options['vqa'],
                                     options['coco'],
@@ -38,20 +70,20 @@ def main():
                                         num_workers=1,
                                         shuffle=True)
 
-    train_examples_list = pickle.load(open('data/vqa2/processed/nans,2000_maxlength,26_minwcount,0_nlp,mcb_pad,right_trainsplit,train/trainset.pickle', 'rb'))
+    train_examples_list = pickle.load(open(options['vqa']['path_trainset'], 'rb'))
     q_id_to_example = {ex['question_id']: ex for ex in train_examples_list}
 
-    comp_pairs = json.load(open("data/vqa2/raw/annotations/v2_mscoco_train2014_complementary_pairs.json", "r"))
+    comp_pairs = json.load(open(options['vqa']['path_comp_pairs'], 'r'))
     q_to_comp = {}
     for q1, q2 in comp_pairs:
         q_to_comp[q1] = q2
         q_to_comp[q2] = q1
 
-    print("=> Loading KNN data...")
-    knns = np.load("data/coco/extract/arch,fbresnet152_size,448/knn/knn_results_trainset.npy").reshape(1)[0]
+    print('=> Loading KNN data...')
+    knns = np.load(os.path.join(options['coco']['path_knn'], 'knn_results_trainset.npy')).reshape(1)[0]
 
-    print("=> Loading COCO image features...")
-    f = h5py.File('data/coco/extract/arch,fbresnet152_size,448/trainset.hdf5', 'r')
+    print('=> Loading COCO image features...')
+    f = h5py.File(os.path.join(options['coco']['path_raw'], 'trainset.hdf5'), 'r')
     features = f.get('noatt')
 
     for s_idx, sample in tqdm(enumerate(train_loader)):
@@ -63,7 +95,7 @@ def buildTrainExample(sample, dataset, features, knns, q_id_to_example, q_to_com
 
     # Get KNNs for original image
     v_ids_orig = [dataset.dataset_img.name_to_index[image_name] for image_name in sample['image_name']]
-    knns_batch = [list(knns["indices"][i]) for i in v_ids_orig]
+    knns_batch = [list(knns['indices'][i]) for i in v_ids_orig]
 
     # Get complementary questions
     q_ids_comp = []
@@ -123,10 +155,10 @@ def buildTrainExample(sample, dataset, features, knns, q_id_to_example, q_to_com
         'v': knn_features,
     }
 
-    # print("Missing q_comp: {}".format(err_no_comp))
-    # print("Missing ex: {}".format(err_no_ex))
-    # print("Comp not in KNNs: {}".format(err_no_knn))
-    # print("Total: {} / {}".format(len(good_idxs), len(sample['image_name'])))
+    # print('Missing q_comp: {}'.format(err_no_comp))
+    # print('Missing ex: {}'.format(err_no_ex))
+    # print('Comp not in KNNs: {}'.format(err_no_knn))
+    # print('Total: {} / {}'.format(len(good_idxs), len(sample['image_name'])))
 
     return orig, comp, neighbors
 
