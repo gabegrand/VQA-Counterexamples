@@ -22,43 +22,48 @@ import vqa.lib.criterions as criterions
 import vqa.datasets as datasets
 import vqa.models as models
 
-with open('options/vqa2/mutan_noatt_train_cex.yaml', 'r') as handle:
-    options = yaml.load(handle)
-options['vgenome'] = None
+def main():
 
-trainset = datasets.factory_VQA(options['vqa']['trainsplit'],
-                                options['vqa'],
-                                options['coco'],
-                                options['vgenome'])
+    with open('options/vqa2/mutan_noatt_train_cex.yaml', 'r') as handle:
+        options = yaml.load(handle)
+    options['vgenome'] = None
 
-train_loader = trainset.data_loader(batch_size=options['optim']['batch_size'],
-                                    num_workers=1,
-                                    shuffle=True)
+    print("=> Loading VQA dataset...")
+    trainset = datasets.factory_VQA(options['vqa']['trainsplit'],
+                                    options['vqa'],
+                                    options['coco'],
+                                    options['vgenome'])
 
-print("Loaded trainset")
+    train_loader = trainset.data_loader(batch_size=options['optim']['batch_size'],
+                                        num_workers=1,
+                                        shuffle=True)
 
-train_examples_list = pickle.load(open('data/vqa2/processed/nans,2000_maxlength,26_minwcount,0_nlp,mcb_pad,right_trainsplit,train/trainset.pickle', 'rb'))
-q_id_to_example = {ex['question_id']: ex for ex in train_examples_list}
+    train_examples_list = pickle.load(open('data/vqa2/processed/nans,2000_maxlength,26_minwcount,0_nlp,mcb_pad,right_trainsplit,train/trainset.pickle', 'rb'))
+    q_id_to_example = {ex['question_id']: ex for ex in train_examples_list}
 
-comp_pairs = json.load(open("data/vqa2/raw/annotations/v2_mscoco_train2014_complementary_pairs.json", "r"))
-q_to_comp = {}
-for q1, q2 in comp_pairs:
-    q_to_comp[q1] = q2
-    q_to_comp[q2] = q1
+    comp_pairs = json.load(open("data/vqa2/raw/annotations/v2_mscoco_train2014_complementary_pairs.json", "r"))
+    q_to_comp = {}
+    for q1, q2 in comp_pairs:
+        q_to_comp[q1] = q2
+        q_to_comp[q2] = q1
 
-knns = np.load("data/coco/extract/arch,fbresnet152_size,448/knn/knn_results_trainset.npy").reshape(1)[0]
-knn_idx = knns["indices"]
+    print("=> Loading KNN data...")
+    knns = np.load("data/coco/extract/arch,fbresnet152_size,448/knn/knn_results_trainset.npy").reshape(1)[0]
 
-f = h5py.File('data/coco/extract/arch,fbresnet152_size,448/trainset.hdf5', 'r')
-features = f.get('noatt')
+    print("=> Loading COCO image features...")
+    f = h5py.File('data/coco/extract/arch,fbresnet152_size,448/trainset.hdf5', 'r')
+    features = f.get('noatt')
 
-print("Loaded KNN features")
+    for s_idx, sample in tqdm(enumerate(train_loader)):
 
-for s_idx, sample in tqdm(enumerate(train_loader)):
+        orig, comp, neighbors = buildTrainExample(sample, trainset, features, knns, q_id_to_example, q_to_comp)
+
+
+def buildTrainExample(sample, dataset, features, knns, q_id_to_example, q_to_comp):
 
     # Get KNNs for original image
-    v_ids_orig = [trainset.dataset_img.name_to_index[image_name] for image_name in sample['image_name']]
-    knns_batch = [list(knn_idx[i]) for i in v_ids_orig]
+    v_ids_orig = [dataset.dataset_img.name_to_index[image_name] for image_name in sample['image_name']]
+    knns_batch = [list(knns["indices"][i]) for i in v_ids_orig]
 
     # Get complementary questions
     q_ids_comp = []
@@ -83,7 +88,7 @@ for s_idx, sample in tqdm(enumerate(train_loader)):
             continue
         image_names_comp.append(q_id_to_example[q_id]['image_name'])
 
-    v_ids_comp = [trainset.dataset_img.name_to_index[name] if name is not None else None for name in image_names_comp]
+    v_ids_comp = [dataset.dataset_img.name_to_index[name] if name is not None else None for name in image_names_comp]
 
     good_idxs = []
     comp_idxs = []
@@ -95,6 +100,9 @@ for s_idx, sample in tqdm(enumerate(train_loader)):
                 comp_idxs.append(knns_batch[i].index(v_id))
             else:
                 err_no_knn += 1
+
+    if len(good_idxs) == 0:
+        continue
 
     # Get KNN features for good examples
     knn_features = [np.array([features[i] for i in knns_batch[j]]) for j in good_idxs]
@@ -119,3 +127,9 @@ for s_idx, sample in tqdm(enumerate(train_loader)):
     # print("Missing ex: {}".format(err_no_ex))
     # print("Comp not in KNNs: {}".format(err_no_knn))
     # print("Total: {} / {}".format(len(good_idxs), len(sample['image_name'])))
+
+    return orig, comp, neighbors
+
+
+if __name__ == '__main__':
+    main()
