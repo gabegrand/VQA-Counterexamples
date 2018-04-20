@@ -13,7 +13,10 @@ from tqdm import tqdm
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.backends.cudnn as cudnn
+from torch import Tensor
+from torch.autograd import Variable
 
 import vqa.lib.engine as engine
 import vqa.lib.utils as utils
@@ -21,6 +24,7 @@ import vqa.lib.logger as logger
 import vqa.lib.criterions as criterions
 import vqa.datasets as datasets
 import vqa.models as models
+from vqa.models.cx import RandomBaseline, DistanceBaseline, CXModel, MutanNoAttCX
 
 
 parser = argparse.ArgumentParser()
@@ -65,10 +69,13 @@ def main():
                                     options['vqa'],
                                     options['coco'],
                                     options['vgenome'])
-
     train_loader = trainset.data_loader(batch_size=options['optim']['batch_size'],
                                         num_workers=1,
                                         shuffle=True)
+
+    # valset = datasets.factory_VQA('val', options['vqa'], options['coco'])
+    # val_loader = valset.data_loader(batch_size=options['optim']['batch_size'],
+    #                                 num_workers=1)
 
     train_examples_list = pickle.load(open(options['vqa']['path_trainset'], 'rb'))
     q_id_to_example = {ex['question_id']: ex for ex in train_examples_list}
@@ -86,9 +93,59 @@ def main():
     f = h5py.File(os.path.join(options['coco']['path_raw'], 'trainset.hdf5'), 'r')
     features = f.get('noatt')
 
-    for s_idx, sample in tqdm(enumerate(train_loader)):
+    #########################################################################################
+    # Create model
+    #########################################################################################
+    print('=> Building model...')
 
-        orig, comp, neighbors = buildTrainExample(sample, trainset, features, knns, q_id_to_example, q_to_comp)
+    # model = DistanceBaseline(knn_size=24)
+    vqa_model = models.factory(options['model'],
+                       trainset.vocab_words(), trainset.vocab_answers(),
+                       cuda=True, data_parallel=True)
+    model = CXModel(vqa_model, knn_size=24)
+
+    #########################################################################################
+    # Train loop
+    #########################################################################################
+
+    for epoch in range(0, options['optim']['epochs']):
+
+        # TRAIN
+        total_examples = total_correct = 0
+        s_idx = 0
+        for sample in tqdm(train_loader):
+
+            example = buildTrainExample(sample, trainset, features, knns, q_id_to_example, q_to_comp)
+            if example is None:
+                continue
+
+            batch_size = example['orig']['idxs'].shape[0]
+
+            scores = model(example)
+
+            correct = recallAtK(scores, example['comp']['idxs'], k=5)
+
+            total_examples += batch_size
+            total_correct += correct.sum()
+
+            if s_idx % 100 == 0:
+                print("Epoch {} ({}/{}): Recall@5: {:.4f}".format(
+                       epoch, s_idx, len(train_loader), total_correct / total_examples))
+
+            s_idx += 1
+
+        # # VAL
+        # for sample in tqdm(val_loader):
+        #
+        #     example = buildTrainExample(sample, valset, features, knns, q_id_to_example, q_to_comp)
+        #     if example is None:
+        #         continue
+
+
+def recallAtK(scores, ground_truth, k=5):
+    _, top_idxs = scores.topk(k)
+    return (Tensor(ground_truth.reshape((-1, 1))).expand_as(top_idxs).numpy() == \
+            top_idxs.cpu().data.numpy()).sum(axis=1)
 
 
 def buildTrainExample(sample, dataset, features, knns, q_id_to_example, q_to_comp):
@@ -134,25 +191,32 @@ def buildTrainExample(sample, dataset, features, knns, q_id_to_example, q_to_com
                 err_no_knn += 1
 
     if len(good_idxs) == 0:
-        continue
+        return None
 
     # Get KNN features for good examples
-    knn_features = [np.array([features[i] for i in knns_batch[j]]) for j in good_idxs]
+    knn_features = np.array([[features[i] for i in knns_batch[j][1:]] for j in good_idxs])
 
     orig = {
         # Index of original image within knns is always zero
         'idxs': np.zeros(len(good_idxs)),
-        'q': sample['question'][good_idxs],
+        'v': sample['visual'][good_idxs].cuda(),
+        'q': sample['question'][good_idxs].cuda(),
         'q_id': sample['question_id'][good_idxs],
-        'a': sample['question'][good_idxs],
+        'a': sample['answer'][good_idxs].cuda(),
     }
     comp = {
         # Index (0 - 24) of comp within knns of original image
-        'idxs': comp_idxs,
+        'idxs': np.array(comp_idxs) - 1,
         'q_id': [q_ids_comp[q_id] for q_id in good_idxs]
     }
-    neighbors = {
-        'v': knn_features,
+    knns = {
+        'v': Tensor(knn_features).cuda(),
+    }
+
+    example = {
+        'orig': orig,
+        'comp': comp,
+        'knns': knns,
     }
 
     # print('Missing q_comp: {}'.format(err_no_comp))
@@ -160,7 +224,7 @@ def buildTrainExample(sample, dataset, features, knns, q_id_to_example, q_to_com
     # print('Comp not in KNNs: {}'.format(err_no_knn))
     # print('Total: {} / {}'.format(len(good_idxs), len(sample['image_name'])))
 
-    return orig, comp, neighbors
+    return example
 
 
 if __name__ == '__main__':

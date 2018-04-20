@@ -20,7 +20,7 @@ coco:
     path_raw: 'data/coco/extract/arch,fbresnet152_size,448/'
     path_knn: 'data/coco/extract/arch,fbresnet152_size,448/knn/'
 model:
-    arch: MutanNoAtt
+    arch: MutanNoAttCX
     seq2vec:
         arch: skipthoughts
         dir_st: data/skip-thoughts
