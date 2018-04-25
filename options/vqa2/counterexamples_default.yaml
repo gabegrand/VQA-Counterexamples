@@ -10,7 +10,7 @@ vqa:
     nlp: mcb
     pad: right
     samplingans: True
-    path_trainset: 'data/vqa2/processed/nans,2000_maxlength,26_minwcount,0_nlp,mcb_pad,right_trainsplit,train/trainset.pickle'
+    path_trainset: 'data/vqa2/processed/nans,2000_maxlength,26_minwcount,0_nlp,mcb_pad,right_trainsplit,train/'
     path_comp_pairs: 'data/vqa2/raw/annotations/v2_mscoco_train2014_complementary_pairs.json'
 coco:
     dir: data/coco
@@ -18,7 +18,7 @@ coco:
     mode: noatt
     size: 448
     path_raw: 'data/coco/extract/arch,fbresnet152_size,448/'
-    path_knn: 'data/coco/extract/arch,fbresnet152_size,448/knn/'
+    path_knn: 'data/coco/knn/mscoco_train2014_nn_images.json'
 model:
     arch: MutanNoAttCX
     seq2vec:

@@ -27,7 +27,7 @@ class MLBFusion(AbstractFusion):
             self.linear_q = nn.Linear(self.opt['dim_q'], self.opt['dim_h'])
         else:
             print('Warning fusion.py: no question embedding before fusion')
-        
+
     def forward(self, input_v, input_q):
         # visual (cnn features)
         if 'dim_v' in self.opt:
@@ -66,7 +66,7 @@ class MutanFusion(AbstractFusion):
             self.linear_q = nn.Linear(self.opt['dim_q'], self.opt['dim_hq'])
         else:
             print('Warning fusion.py: no question embedding before fusion')
-        
+
         self.list_linear_hv = nn.ModuleList([
             nn.Linear(self.opt['dim_hv'], self.opt['dim_mm'])
             for i in range(self.opt['R'])])
@@ -77,6 +77,7 @@ class MutanFusion(AbstractFusion):
 
     def forward(self, input_v, input_q):
         if input_v.dim() != input_q.dim() and input_v.dim() != 2:
+            print(input_v.dim(), input_q.dim())
             raise ValueError
         batch_size = input_v.size(0)
 
@@ -143,4 +144,3 @@ class MutanFusion2d(MutanFusion):
         x_mm = super().forward(x_v, x_q)
         x_mm = x_mm.view(batch_size, weight_height, self.opt['dim_mm'])
         return x_mm
-

@@ -1,6 +1,5 @@
 import time
 import torch
-from tqdm import tqdm
 from torch.autograd import Variable
 import vqa.lib.utils as utils
 
@@ -10,7 +9,7 @@ def train(loader, model, criterion, optimizer, logger, epoch, print_freq=10):
     meters = logger.reset_meters('train')
 
     end = time.time()
-    for i, sample in tqdm(enumerate(loader)):
+    for i, sample in enumerate(loader):
 
         batch_size = sample['visual'].size(0)
 
