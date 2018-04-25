@@ -85,7 +85,7 @@ def main():
     #########################################################################################
     print('=> Building model...')
 
-    # cx_model = DistanceBaseline(knn_size=24)
+    # cx_model = RandomBaseline(knn_size=24)
     vqa_model = models.factory(options['model'],
                        trainset['vocab_words'], trainset['vocab_answers'],
                        cuda=True, data_parallel=True)

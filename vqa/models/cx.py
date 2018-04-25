@@ -72,17 +72,21 @@ class CXModel(nn.Module):
 
     def forward(self, image_features, knn_features, question_wids, answer_aid):
 
-        y_orig, _ = self.vqa_model(Variable(image_features), Variable(question_wids))
-        y_orig = y_orig.detach()
+        batch_size = 1
 
-        y_knns_list = []
-        a_knns_list = []
-        for k in range(self.knn_size):
-            y, a = self.vqa_model(Variable(knn_features[:, k]), Variable(question_wids))
-            y_knns_list.append(y)
-            a_knns_list.append(a)
+        # Process all image features as a single batch
+        features_input = Variable(torch.cat([image_features, knn_features.view(batch_size * self.knn_size, -1)]))
+        question_input = Variable(question_wids.expand(batch_size * (self.knn_size + 1), -1))
 
-        a_knns = torch.stack(a_knns_list, dim=1)
+        y, a = self.vqa_model(features_input, question_input)
+        a = a.view(batch_size, self.knn_size + 1, -1)
+
+        # Unpack image features into original and knns
+        a_orig = a[:, 0, :]
+        y_orig = a[:, 0, :]
+
+        a_knns = a[:, 1:, :]
+        y_knns = a[:, 1:, :]
 
         # VQA model's score for the original answer for each KNN
         scores_list = []
