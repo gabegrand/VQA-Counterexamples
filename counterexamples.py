@@ -5,7 +5,7 @@ import json
 import numpy as np
 import os
 import pickle
-import re
+import random
 import shutil
 import yaml
 
@@ -43,6 +43,8 @@ parser.add_argument('-b', '--batch_size', type=int,
 parser.add_argument('--epochs', type=int,
                     help='number of total epochs to run')
 
+parser.add_argument('-dev', '--dev_mode', action='store_true')
+
 def main():
 
     args = parser.parse_args()
@@ -69,23 +71,30 @@ def main():
     #########################################################################################
 
     print('=> Loading VQA dataset...')
-    trainset = pickle.load(open(os.path.join(options['vqa']['path_trainset'], 'trainset_augmented.pickle'), 'rb'))
-    # trainset = pickle.load(open(os.path.join(options['vqa']['path_trainset'], 'trainset_augmented_small.pickle'), 'rb'))
+    if args.dev_mode:
+        trainset_fname = 'trainset_augmented_small.pickle'
+    else:
+        trainset_fname = 'trainset_augmented.pickle'
+    trainset = pickle.load(open(os.path.join(options['vqa']['path_trainset'], trainset_fname), 'rb'))
 
     print('=> Loading KNN data...')
     knns = json.load(open(options['coco']['path_knn'], 'r'))
     knns = {int(k):v for k,v in knns.items()}
 
     print('=> Loading COCO image features...')
-    f = h5py.File(os.path.join(options['coco']['path_raw'], 'trainset.hdf5'), 'r')
-    features = f.get('noatt')
+    features_train = h5py.File(os.path.join(options['coco']['path_raw'], 'trainset.hdf5'), 'r').get('noatt')
+    features_train = np.array(features_train)
+
+    if not args.dev_mode:
+        features_val = h5py.File(os.path.join(options['coco']['path_raw'], 'valset.hdf5'), 'r').get('noatt')
+        features_val = np.array(features_val)
 
     #########################################################################################
     # Create model
     #########################################################################################
     print('=> Building model...')
 
-    # cx_model = RandomBaseline(knn_size=24)
+    # cx_model = DistanceBaseline(knn_size=24)
     vqa_model = models.factory(options['model'],
                        trainset['vocab_words'], trainset['vocab_answers'],
                        cuda=True, data_parallel=True)
@@ -102,45 +111,58 @@ def main():
 
         # TRAIN
         total_examples = total_correct = 0
-        s_idx = 0
 
-        for ex in tqdm(trainset['examples_list']):
+        for batch in tqdm(batchify(trainset['examples_list'], batch_size=options['optim']['batch_size'])):
+            batch_size = len(batch)
+            image_features, question_wids, answer_aids, comp_idxs = getDataFromBatch(batch, features_train, trainset['name_to_index'])
 
-            batch_size = 1
+            scores = cx_model(image_features, question_wids, answer_aids)
 
-            # Get image features
-            # TODO: if these load slowly, put features on CPU
-            image_features = torch.from_numpy(features[trainset['name_to_index'][ex['image_name']]]).view(batch_size, -1).cuda()
-            knn_idx = sorted([trainset['name_to_index'][name] for name in ex['knns']])
-            knn_features = torch.from_numpy(features[knn_idx]).view(batch_size, 24, -1).cuda()
-
-            # Put other tensors on GPU
-            # TODO: unclear if necessary
-            question_wids = torch.LongTensor(ex['question_wids']).view(batch_size, -1).cuda()
-            answer_aid = [ex['answer_aid']]
-
-            scores = cx_model(image_features, knn_features, question_wids, answer_aid)
-
-            correct = recallAtK(scores, np.array(ex['comp']['knn_index']), k=5)
+            correct = recallAtK(scores, np.array(comp_idxs), k=5)
 
             total_examples += batch_size
             total_correct += correct.sum()
 
-            if s_idx % 100 == 0:
+            if total_examples % 100 == 0 or total_examples == len(trainset['examples_list']):
                 print("Epoch {} ({}/{}): Recall@5: {:.4f}".format(
-                       epoch, s_idx, len(trainset['examples_list']), total_correct / total_examples))
+                       epoch, total_examples, len(trainset['examples_list']), total_correct / total_examples))
 
-            s_idx += 1
 
-        # # VAL
-        # for sample in tqdm(val_loader):
-        #
-        #     example = buildTrainExample(sample, valset, features, knns, q_id_to_example, q_to_comp)
-        #     if example is None:
-        #         continue
+       #TODO: Val
+
+
+def batchify(example_list, batch_size, shuffle=True):
+    if shuffle:
+        random.shuffle(example_list)
+    batched_dataset = []
+    for i in range(0, len(example_list), batch_size):
+        batched_dataset.append(example_list[i:min(i + batch_size, len(example_list))])
+    return batched_dataset
+
+
+def getDataFromBatch(batch, features, name_to_index):
+    image_idxs = []
+    question_wids = []
+    answer_aids = []
+    comp_idxs = []
+
+    for ex in batch:
+        image_idx = [name_to_index[ex['image_name']]]
+        knn_idxs = [name_to_index[name] for name in ex['knns']]
+        image_idxs.append(image_idx + knn_idxs)
+        question_wids.append(ex['question_wids'])
+        answer_aids.append(ex['answer_aid'])
+        comp_idxs.append(ex['comp']['knn_index'])
+
+    image_features = torch.from_numpy(np.array([features[idxs] for idxs in image_idxs])).cuda()
+    question_wids = torch.LongTensor(question_wids).cuda()
+    answer_aids = torch.LongTensor(answer_aids).cuda()
+
+    return image_features, question_wids, answer_aids, comp_idxs
 
 
 def recallAtK(scores, ground_truth, k=5):
+    assert(scores.shape[0] == ground_truth.shape[0])
     _, top_idxs = scores.topk(k)
     return (Tensor(ground_truth.reshape((-1, 1))).expand_as(top_idxs).numpy() == \
             top_idxs.cpu().data.numpy()).sum(axis=1)

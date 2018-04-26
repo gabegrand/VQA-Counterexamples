@@ -15,8 +15,8 @@ class RandomBaseline(nn.Module):
 
         self.knn_size = knn_size
 
-    def forward(self, *args, **kwargs):
-        batch_size = 1
+    def forward(self, image_features, question_wids, answer_aids):
+        batch_size = image_features.size(0)
         scores = Variable(torch.rand((batch_size, self.knn_size)))
         return F.softmax(scores, dim=1)
 
@@ -28,8 +28,8 @@ class DistanceBaseline(nn.Module):
 
         self.knn_size = knn_size
 
-    def forward(self, *args, **kwargs):
-        batch_size = 1
+    def forward(self, image_features, question_wids, answer_aids):
+        batch_size = image_features.size(0)
         scores = Variable(Tensor(list(reversed(range(self.knn_size)))).view(1, -1).expand((batch_size, self.knn_size)))
         return F.softmax(scores, dim=1)
 
@@ -70,27 +70,32 @@ class CXModel(nn.Module):
 
         self.knn_size = knn_size
 
-    def forward(self, image_features, knn_features, question_wids, answer_aid):
+    def forward(self, image_features, question_wids, answer_aids):
 
-        batch_size = 1
+        assert(image_features.size(1) == self.knn_size + 1)
+        batch_size = image_features.size(0)
 
         # Process all image features as a single batch
-        features_input = Variable(torch.cat([image_features, knn_features.view(batch_size * self.knn_size, -1)]))
-        question_input = Variable(question_wids.expand(batch_size * (self.knn_size + 1), -1))
+        image_input = Variable(image_features.view(batch_size * (self.knn_size + 1), -1))
 
-        y, a = self.vqa_model(features_input, question_input)
+        # Duplicate each question knn_size + 1 times
+        question_input = question_wids.view(batch_size, 1, -1).expand(batch_size, self.knn_size + 1, -1).contiguous()
+        question_input = Variable(question_input.view(batch_size * (self.knn_size + 1), -1))
+
+        # Run the VQA model
+        y, a = self.vqa_model(image_input, question_input)
         a = a.view(batch_size, self.knn_size + 1, -1)
+        y = y.view(batch_size, self.knn_size + 1, -1)
 
-        # Unpack image features into original and knns
+        # Separate results into original and knns
         a_orig = a[:, 0, :]
-        y_orig = a[:, 0, :]
-
+        y_orig = y[:, 0, :]
         a_knns = a[:, 1:, :]
-        y_knns = a[:, 1:, :]
+        y_knns = y[:, 1:, :]
 
         # VQA model's score for the original answer for each KNN
         scores_list = []
-        for i, a_idx in enumerate(answer_aid):
+        for i, a_idx in enumerate(answer_aids):
             scores_list.append(a_knns[i, :, a_idx])
         scores = torch.stack(scores_list, dim=0)
 
