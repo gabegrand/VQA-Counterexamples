@@ -26,7 +26,7 @@ import vqa.lib.logger as logger
 import vqa.lib.criterions as criterions
 import vqa.datasets as datasets
 import vqa.models as models
-from vqa.models.cx import RandomBaseline, DistanceBaseline, CXModel, MutanNoAttCX
+from vqa.models.cx import RandomBaseline, DistanceBaseline, BlackBox
 
 from train import load_checkpoint
 
@@ -73,9 +73,14 @@ def main():
     print('=> Loading VQA dataset...')
     if args.dev_mode:
         trainset_fname = 'trainset_augmented_small.pickle'
+        valset_fname = 'valset_augmented_small.pickle'
     else:
         trainset_fname = 'trainset_augmented.pickle'
+        valset_fname = 'valset_augmented.pickle'
     trainset = pickle.load(open(os.path.join(options['vqa']['path_trainset'], trainset_fname), 'rb'))
+
+    if not args.dev_mode:
+        valset = pickle.load(open(os.path.join(options['vqa']['path_trainset'], valset_fname), 'rb'))
 
     print('=> Loading KNN data...')
     knns = json.load(open(options['coco']['path_knn'], 'r'))
@@ -101,7 +106,7 @@ def main():
 
     start_epoch, best_acc1, exp_logger = load_checkpoint(vqa_model.module, None, os.path.join(options['logs']['dir_logs'], 'best'))
 
-    cx_model = CXModel(vqa_model, knn_size=24)
+    cx_model = BlackBox(vqa_model, knn_size=24)
 
     #########################################################################################
     # Train loop
