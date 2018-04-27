@@ -19,6 +19,7 @@ import torch.nn.functional as F
 import torch.backends.cudnn as cudnn
 from torch import Tensor
 from torch.autograd import Variable
+from tensorboard import SummaryWriter
 
 import vqa.lib.engine as engine
 import vqa.lib.utils as utils
@@ -26,7 +27,7 @@ import vqa.lib.logger as logger
 import vqa.lib.criterions as criterions
 import vqa.datasets as datasets
 import vqa.models as models
-from vqa.models.cx import RandomBaseline, DistanceBaseline, BlackBox
+from vqa.models.cx import RandomBaseline, DistanceBaseline, BlackBox, LinearContext
 
 from train import load_checkpoint
 
@@ -42,6 +43,8 @@ parser.add_argument('-b', '--batch_size', type=int,
                     help='mini-batch size')
 parser.add_argument('--epochs', type=int,
                     help='number of total epochs to run')
+
+parser.add_argument('-c', '--comment', type=str)
 
 parser.add_argument('-dev', '--dev_mode', action='store_true')
 
@@ -101,16 +104,23 @@ def main():
 
     # cx_model = DistanceBaseline(knn_size=24)
     vqa_model = models.factory(options['model'],
-                       trainset['vocab_words'], trainset['vocab_answers'],
-                       cuda=True, data_parallel=True)
+                               trainset['vocab_words'], trainset['vocab_answers'],
+                               cuda=True, data_parallel=True)
 
-    start_epoch, best_acc1, exp_logger = load_checkpoint(vqa_model.module, None, os.path.join(options['logs']['dir_logs'], 'best'))
+    if not args.dev_mode:
+        start_epoch, best_acc1, exp_logger = load_checkpoint(vqa_model.module, None, os.path.join(options['logs']['dir_logs'], 'best'))
 
-    cx_model = BlackBox(vqa_model, knn_size=24)
+    # cx_model = BlackBox(vqa_model, knn_size=24)
+    cx_model = LinearContext(vqa_model, knn_size=24)
+    cx_model.cuda()
 
     #########################################################################################
     # Train loop
     #########################################################################################
+
+    optimizer = torch.optim.Adam(cx_model.parameters(), lr=1e-3)
+    criterion = nn.CrossEntropyLoss()
+    writer = SummaryWriter()
 
     for epoch in range(0, options['optim']['epochs']):
 
@@ -123,14 +133,23 @@ def main():
 
             scores = cx_model(image_features, question_wids, answer_aids)
 
-            correct = recallAtK(scores, np.array(comp_idxs), k=5)
+            loss = criterion(scores, comp_idxs)
+
+            correct = recallAtK(scores, comp_idxs, k=5)
 
             total_examples += batch_size
             total_correct += correct.sum()
 
+            loss.backward()
+            optimizer.step()
+
             if total_examples % 100 == 0 or total_examples == len(trainset['examples_list']):
-                print("Epoch {} ({}/{}): Recall@5: {:.4f}".format(
-                       epoch, total_examples, len(trainset['examples_list']), total_correct / total_examples))
+                recall = total_correct / total_examples
+                print("Epoch {} ({}/{}): Loss: {:.2f}, Recall@5: {:.4f}".format(epoch, total_examples, len(trainset['examples_list']), float(loss), recall))
+
+                ex_num = (epoch * len(trainset['examples_list'])) + total_examples
+                writer.add_scalar('recall@5', recall, ex_num)
+                writer.add_scalar('loss_train', loss, ex_num)
 
 
        #TODO: Val
@@ -162,6 +181,7 @@ def getDataFromBatch(batch, features, name_to_index):
     image_features = torch.from_numpy(np.array([features[idxs] for idxs in image_idxs])).cuda()
     question_wids = torch.LongTensor(question_wids).cuda()
     answer_aids = torch.LongTensor(answer_aids).cuda()
+    comp_idxs = Variable(torch.LongTensor(comp_idxs), requires_grad=False).cuda()
 
     return image_features, question_wids, answer_aids, comp_idxs
 
@@ -169,6 +189,7 @@ def getDataFromBatch(batch, features, name_to_index):
 def recallAtK(scores, ground_truth, k=5):
     assert(scores.shape[0] == ground_truth.shape[0])
     _, top_idxs = scores.topk(k)
+    ground_truth = ground_truth.cpu().data.numpy()
     return (Tensor(ground_truth.reshape((-1, 1))).expand_as(top_idxs).numpy() == \
             top_idxs.cpu().data.numpy()).sum(axis=1)
 

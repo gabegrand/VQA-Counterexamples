@@ -21,7 +21,7 @@ class RandomBaseline(nn.Module):
     def forward(self, image_features, question_wids, answer_aids):
         batch_size = image_features.size(0)
         scores = Variable(torch.rand((batch_size, self.knn_size)))
-        return F.softmax(scores, dim=1)
+        return scores
 
 
 class DistanceBaseline(nn.Module):
@@ -34,7 +34,7 @@ class DistanceBaseline(nn.Module):
     def forward(self, image_features, question_wids, answer_aids):
         batch_size = image_features.size(0)
         scores = Variable(Tensor(list(reversed(range(self.knn_size)))).view(1, -1).expand((batch_size, self.knn_size)))
-        return F.softmax(scores, dim=1)
+        return scores
 
 
 ################################################################################
@@ -98,10 +98,10 @@ class CXModelBase(nn.Module):
         y = y.view(batch_size, self.knn_size + 1, -1)
 
         # Separate results into original and knns
-        a_orig = a[:, 0, :]
-        y_orig = y[:, 0, :]
-        a_knns = a[:, 1:, :]
-        y_knns = y[:, 1:, :]
+        a_orig = a[:, 0, :].contiguous()
+        y_orig = y[:, 0, :].contiguous()
+        a_knns = a[:, 1:, :].contiguous()
+        y_knns = y[:, 1:, :].contiguous()
 
         return a_orig, y_orig, a_knns, y_knns
 
@@ -117,10 +117,11 @@ class BlackBox(CXModelBase):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.vqa_model.eval()
 
     def forward(self, image_features, question_wids, answer_aids):
-
-        a_orig, y_orig, a_knns, y_knns = self.vqa_forward(image_features, question_wids)
+        _, _, a_knns, _ = self.vqa_forward(image_features, question_wids)
+        a_knns = a_knns.detach()
 
         # VQA model's score for the original answer for each KNN
         scores_list = []
@@ -128,7 +129,29 @@ class BlackBox(CXModelBase):
             scores_list.append(a_knns[i, :, a_idx])
         scores = torch.stack(scores_list, dim=0)
 
+        print(scores.shape)
+
         # Flip the sign, since the highest scoring items are the worst counterexamples
         scores = -scores
 
-        return F.softmax(scores, dim=1)
+        return scores
+
+
+class LinearContext(CXModelBase):
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # TODO: will need to be able to switch this to eval during eval
+        self.vqa_model.eval()
+        self.dim_y = self.vqa_model.module.opt['fusion']['dim_mm']
+
+        self.linear = nn.Linear(self.knn_size * self.dim_y, self.knn_size)
+
+    def forward(self, image_features, question_wids, answer_aids):
+        a_orig, y_orig, a_knns, y_knns = self.vqa_forward(image_features, question_wids)
+        y_knns = y_knns.detach()
+
+        scores = self.linear(y_knns.view(-1, self.knn_size * self.dim_y))
+        # TODO: dropout
+
+        return scores
