@@ -118,7 +118,7 @@ def main():
     # Train loop
     #########################################################################################
 
-    optimizer = torch.optim.Adam(cx_model.parameters(), lr=1e-3)
+    optimizer = torch.optim.Adam(cx_model.parameters(), lr=1e-4)
     criterion = nn.CrossEntropyLoss()
     writer = SummaryWriter()
 
@@ -185,7 +185,7 @@ def getDataFromBatch(batch, features, name_to_index):
     image_features = torch.from_numpy(np.array([features[idxs] for idxs in image_idxs])).cuda()
     question_wids = torch.LongTensor(question_wids).cuda()
     answer_aids = torch.LongTensor(answer_aids).cuda()
-    comp_idxs = Variable(torch.LongTensor(comp_idxs), requires_grad=False)
+    comp_idxs = Variable(torch.LongTensor(comp_idxs), requires_grad=False).cuda()
 
     return image_features, question_wids, answer_aids, comp_idxs
 
