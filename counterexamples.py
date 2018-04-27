@@ -126,6 +126,7 @@ def main():
 
         # TRAIN
         total_examples = total_correct = 0
+        cx_model.train()
 
         for batch in tqdm(batchify(trainset['examples_list'], batch_size=options['optim']['batch_size'])):
             batch_size = len(batch)
@@ -142,6 +143,9 @@ def main():
 
             loss.backward()
             optimizer.step()
+
+            # for name, p in cx_model.named_parameters():
+            #     print(name, p.grad)
 
             if total_examples % 100 == 0 or total_examples == len(trainset['examples_list']):
                 recall = total_correct / total_examples
@@ -181,7 +185,7 @@ def getDataFromBatch(batch, features, name_to_index):
     image_features = torch.from_numpy(np.array([features[idxs] for idxs in image_idxs])).cuda()
     question_wids = torch.LongTensor(question_wids).cuda()
     answer_aids = torch.LongTensor(answer_aids).cuda()
-    comp_idxs = Variable(torch.LongTensor(comp_idxs), requires_grad=False).cuda()
+    comp_idxs = Variable(torch.LongTensor(comp_idxs), requires_grad=False)
 
     return image_features, question_wids, answer_aids, comp_idxs
 
