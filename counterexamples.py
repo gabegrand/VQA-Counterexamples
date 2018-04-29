@@ -118,7 +118,7 @@ def main():
     # Train loop
     #########################################################################################
 
-    optimizer = torch.optim.Adam(cx_model.parameters(), lr=1e-3)
+    optimizer = torch.optim.Adam(cx_model.parameters(), lr=1e-4)
     criterion = nn.CrossEntropyLoss()
     writer = SummaryWriter()
 
@@ -126,6 +126,7 @@ def main():
 
         # TRAIN
         total_examples = total_correct = 0
+        cx_model.train()
 
         for batch in tqdm(batchify(trainset['examples_list'], batch_size=options['optim']['batch_size'])):
             batch_size = len(batch)
@@ -142,6 +143,9 @@ def main():
 
             loss.backward()
             optimizer.step()
+
+            # for name, p in cx_model.named_parameters():
+            #     print(name, p.grad)
 
             if total_examples % 100 == 0 or total_examples == len(trainset['examples_list']):
                 recall = total_correct / total_examples
