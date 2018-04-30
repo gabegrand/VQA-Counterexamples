@@ -30,7 +30,7 @@ import vqa.datasets as datasets
 import vqa.models as models
 from vqa.models.cx import RandomBaseline, DistanceBaseline, BlackBox, LinearContext
 
-from train import load_checkpoint
+from train import load_checkpoint as load_vqa_checkpoint
 
 
 parser = argparse.ArgumentParser()
@@ -45,6 +45,11 @@ parser.add_argument('-b', '--batch_size', type=int,
 parser.add_argument('--epochs', type=int,
                     help='number of total epochs to run')
 
+parser.add_argument('--resume', default='', type=str,
+                    help='path to latest checkpoint')
+parser.add_argument('--best', action='store_true',
+                    help='whether to resume best checkpoint')
+
 parser.add_argument('-c', '--comment', type=str, default=None)
 parser.add_argument('-p', '--print_freq', default=10, type=int,
                     help='print frequency')
@@ -52,6 +57,7 @@ parser.add_argument('-v', '--eval_freq', default=-1, type=int,
                     help='eval frequency')
 
 parser.add_argument('-dev', '--dev_mode', action='store_true')
+
 
 def main():
 
@@ -73,6 +79,39 @@ def main():
         options_yaml = yaml.load(handle)
     options = utils.update_values(options, options_yaml)
     options['vgenome'] = None
+
+    #########################################################################################
+    # Bookkeeping
+    #########################################################################################
+
+    if args.resume:
+        run_name = args.resume
+        save_dir = os.path.join('logs', 'cx', run_name)
+        assert(os.path.isdir(save_dir))
+
+        i = 1
+        log_dir = os.path.join('runs', run_name, 'resume_{}'.format(i))
+        while(os.path.isdir(log_dir)):
+            i += 1
+            log_dir = os.path.join('runs', run_name, 'resume_{}'.format(i))
+    else:
+        run_name = datetime.now().strftime('%b%d-%H-%M-%S') + '_' + args.comment
+        save_dir = os.path.join('logs', 'cx', run_name)
+        if os.path.isdir(save_dir):
+            if click.confirm('Save directory already exists in {}. Erase?'.format(save_dir)):
+                os.system('rm -r ' + save_dir)
+            else:
+                return
+        os.makedirs(os.path.join(save_dir, 'ckpt'))
+        os.makedirs(os.path.join(save_dir, 'best'))
+        # Tensorboard log directory
+        log_dir = os.path.join('runs', run_name)
+
+    train_writer = SummaryWriter(log_dir=os.path.join(log_dir, 'train'))
+    val_writer = SummaryWriter(log_dir=os.path.join(log_dir, 'val'))
+
+    print('Saving model to {}'.format(save_dir))
+    print('Logging results to {}'.format(log_dir))
 
     #########################################################################################
     # Create datasets
@@ -106,17 +145,22 @@ def main():
     #########################################################################################
     print('=> Building model...')
 
-    # cx_model = DistanceBaseline(knn_size=24)
     vqa_model = models.factory(options['model'],
                                trainset['vocab_words'], trainset['vocab_answers'],
                                cuda=True, data_parallel=True)
     vqa_model = vqa_model.module
 
-    if not args.dev_mode:
-        start_epoch, best_acc1, exp_logger = load_checkpoint(vqa_model, None, os.path.join(options['logs']['dir_logs'], 'best'))
+    load_vqa_checkpoint(vqa_model, None, os.path.join(options['logs']['dir_logs'], 'best'))
 
-    # cx_model = BlackBox(vqa_model, knn_size=24)
     cx_model = LinearContext(vqa_model, knn_size=24)
+
+    if args.resume:
+        info, start_epoch, best_recall = load_cx_checkpoint(cx_model, save_dir, resume_best=args.best)
+    else:
+        info = []
+        start_epoch = 1
+        best_recall = 0
+
     cx_model.cuda()
 
     #########################################################################################
@@ -126,12 +170,7 @@ def main():
 
     optimizer = torch.optim.Adam(cx_model.parameters(), lr=1e-4)
 
-    log_dir = os.path.join('runs', datetime.now().strftime('%b%d_%H-%M-%S') + '_' + args.comment)
-    train_writer = SummaryWriter(log_dir=os.path.join(log_dir, 'train'))
-    val_writer = SummaryWriter(log_dir=os.path.join(log_dir, 'val'))
-    print('Logging results to {}'.format(log_dir))
-
-    for epoch in range(1, options['optim']['epochs'] + 1):
+    for epoch in range(start_epoch, options['optim']['epochs'] + 1):
 
         # TRAIN
         cx_model.train()
@@ -144,7 +183,7 @@ def main():
 
         criterion = nn.CrossEntropyLoss(size_average=False)
 
-        trainset_batched = batchify(trainset['examples_list'], batch_size=options['optim']['batch_size'])[:100]
+        trainset_batched = batchify(trainset['examples_list'], batch_size=options['optim']['batch_size'])[:10]
         for batch in tqdm(trainset_batched):
             image_features, question_wids, answer_aids, comp_idxs = getDataFromBatch(batch, features_train, trainset['name_to_index'])
 
@@ -164,9 +203,18 @@ def main():
                 log_results(train_writer, mode='train', epoch=epoch, i=((epoch - 1) * len(trainset_batched)) + train_b, loss=float(loss), recall=(correct.sum() / len(batch)))
 
             if (args.eval_freq > 0 and train_b % args.eval_freq == 0) or train_b == len(trainset_batched):
-                print('Eval...')
                 eval_results = eval_model(cx_model, valset, features_val, options['optim']['batch_size'])
                 log_results(val_writer, mode='val', epoch=epoch, i=((epoch - 1) * len(trainset_batched)) + train_b, loss=eval_results['loss'], recall=eval_results['recall_5'])
+
+        info.append(eval_results)
+
+        if info[-1]['recall_5'] > best_recall:
+            is_best = True
+            best_recall = info[-1]['recall_5']
+        else:
+            is_best = False
+
+        save_cx_checkpoint(cx_model, info, save_dir, is_best=is_best)
 
 
 def eval_model(cx_model, valset, features_val, batch_size):
@@ -176,7 +224,7 @@ def eval_model(cx_model, valset, features_val, batch_size):
 
     criterion = nn.CrossEntropyLoss(size_average=False)
 
-    valset_batched = batchify(valset['examples_list'], batch_size=batch_size)[:100]
+    valset_batched = batchify(valset['examples_list'], batch_size=batch_size)[:10]
     for batch in tqdm(valset_batched):
         image_features, question_wids, answer_aids, comp_idxs = getDataFromBatch(batch, features_val, valset['name_to_index'])
         scores = cx_model(image_features, question_wids, answer_aids)
@@ -241,9 +289,37 @@ def getDataFromBatch(batch, features, name_to_index):
     return image_features, question_wids, answer_aids, comp_idxs
 
 
-def save_checkpoint(cx_model, save_dir):
-    torch.save(cx_model.state_dict(), save_dir)
-    pass
+def save_cx_checkpoint(cx_model, info, save_dir, is_best=True):
+    path_ckpt_model = os.path.join(save_dir, 'ckpt', 'model.ckpt')
+    path_ckpt_info = os.path.join(save_dir, 'ckpt', 'info.ckpt')
+    path_best_model = os.path.join(save_dir, 'best', 'model.ckpt')
+    path_best_info = os.path.join(save_dir, 'best', 'info.ckpt')
+    torch.save(cx_model.state_dict(), path_ckpt_model)
+    torch.save(info, path_ckpt_info)
+    if is_best:
+        shutil.copyfile(path_ckpt_model, path_best_model)
+        shutil.copyfile(path_ckpt_info, path_best_info)
+    print('{}Saved checkpoint to {}'.format('* ' if is_best else '', save_dir))
+
+
+def load_cx_checkpoint(cx_model, save_dir, resume_best=True):
+    if resume_best:
+        path_ckpt_model = os.path.join(save_dir, 'best', 'model.ckpt')
+        path_ckpt_info = os.path.join(save_dir, 'best', 'info.ckpt')
+    else:
+        path_ckpt_model = os.path.join(save_dir, 'ckpt', 'model.ckpt')
+        path_ckpt_info = os.path.join(save_dir, 'ckpt', 'info.ckpt')
+
+    model_state = torch.load(path_ckpt_model)
+    cx_model.load_state_dict(model_state)
+    print('Loaded model from {}'.format(path_ckpt_model))
+
+    info = torch.load(path_ckpt_info)
+    assert(len(info) > 0)
+    last_epoch = len(info)
+    print('Epoch {}: {}'.format(last_epoch, info[-1]))
+
+    return info, last_epoch + 1, info[-1]['recall_5']
 
 
 if __name__ == '__main__':
