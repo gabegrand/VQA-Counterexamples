@@ -127,6 +127,8 @@ def main():
     optimizer = torch.optim.Adam(cx_model.parameters(), lr=1e-4)
 
     log_dir = os.path.join('runs', datetime.now().strftime('%b%d_%H-%M-%S') + '_' + args.comment)
+    train_writer = SummaryWriter(log_dir=os.path.join(log_dir, 'train'))
+    val_writer = SummaryWriter(log_dir=os.path.join(log_dir, 'val'))
     print('Logging results to {}'.format(log_dir))
 
     for epoch in range(1, options['optim']['epochs'] + 1):
@@ -138,11 +140,11 @@ def main():
         for p in vqa_model.parameters():
             p.requires_grad = False
 
-        train_i = train_b = train_correct = 0
+        train_b = 0
 
         criterion = nn.CrossEntropyLoss(size_average=False)
 
-        trainset_batched = batchify(trainset['examples_list'], batch_size=options['optim']['batch_size'])
+        trainset_batched = batchify(trainset['examples_list'], batch_size=options['optim']['batch_size'])[:100]
         for batch in tqdm(trainset_batched):
             image_features, question_wids, answer_aids, comp_idxs = getDataFromBatch(batch, features_train, trainset['name_to_index'])
 
@@ -152,21 +154,19 @@ def main():
 
             correct = recallAtK(scores, comp_idxs, k=5)
 
-            train_b += 1
-            train_i += len(batch)
-            train_correct += correct.sum()
-
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
+            train_b += 1
+
             if train_b % args.print_freq == 0:
-                log_results(log_dir, mode='train', epoch=epoch, i=(epoch - 1) + train_b, loss=float(loss), recall=(train_correct / train_i))
+                log_results(train_writer, mode='train', epoch=epoch, i=((epoch - 1) * len(trainset_batched)) + train_b, loss=float(loss), recall=(correct.sum() / len(batch)))
 
             if (args.eval_freq > 0 and train_b % args.eval_freq == 0) or train_b == len(trainset_batched):
                 print('Eval...')
                 eval_results = eval_model(cx_model, valset, features_val, options['optim']['batch_size'])
-                log_results(log_dir, mode='val', epoch=epoch, i=(epoch - 1) + train_b, loss=eval_results['loss'], recall=eval_results['recall_5'])
+                log_results(val_writer, mode='val', epoch=epoch, i=((epoch - 1) * len(trainset_batched)) + train_b, loss=eval_results['loss'], recall=eval_results['recall_5'])
 
 
 def eval_model(cx_model, valset, features_val, batch_size):
@@ -176,19 +176,16 @@ def eval_model(cx_model, valset, features_val, batch_size):
 
     criterion = nn.CrossEntropyLoss(size_average=False)
 
-    valset_batched = batchify(valset['examples_list'], batch_size=batch_size)
+    valset_batched = batchify(valset['examples_list'], batch_size=batch_size)[:100]
     for batch in tqdm(valset_batched):
         image_features, question_wids, answer_aids, comp_idxs = getDataFromBatch(batch, features_val, valset['name_to_index'])
-
         scores = cx_model(image_features, question_wids, answer_aids)
 
         val_loss += float(criterion(scores, comp_idxs))
-
         correct = recallAtK(scores, comp_idxs, k=5)
         val_correct += correct.sum()
 
         val_i += len(batch)
-
 
     results = {
         'loss': (val_loss / val_i),
@@ -198,11 +195,18 @@ def eval_model(cx_model, valset, features_val, batch_size):
     return results
 
 
-def log_results(log_dir, mode, epoch, i, loss, recall):
+def log_results(writer, mode, epoch, i, loss, recall):
     print("Epoch {} {}: Loss: {:.2f}, Recall@5: {:.4f}".format(epoch, mode, loss, recall))
-    writer = SummaryWriter(log_dir=os.path.join(log_dir, mode))
     writer.add_scalar('loss', loss, i)
-    writer.add_scalar('recall@5', recall, i)
+    writer.add_scalar('recall_5', recall, i)
+
+
+def recallAtK(scores, ground_truth, k=5):
+    assert(scores.shape[0] == ground_truth.shape[0])
+    _, top_idxs = scores.topk(k)
+    ground_truth = ground_truth.cpu().data.numpy()
+    return (Tensor(ground_truth.reshape((-1, 1))).expand_as(top_idxs).numpy() == \
+            top_idxs.cpu().data.numpy()).sum(axis=1)
 
 
 def batchify(example_list, batch_size, shuffle=True):
@@ -237,29 +241,9 @@ def getDataFromBatch(batch, features, name_to_index):
     return image_features, question_wids, answer_aids, comp_idxs
 
 
-def recallAtK(scores, ground_truth, k=5):
-    assert(scores.shape[0] == ground_truth.shape[0])
-    _, top_idxs = scores.topk(k)
-    ground_truth = ground_truth.cpu().data.numpy()
-    return (Tensor(ground_truth.reshape((-1, 1))).expand_as(top_idxs).numpy() == \
-            top_idxs.cpu().data.numpy()).sum(axis=1)
-
-
-def coco_name_to_num(name):
-    assert(name[-4:] == '.jpg')
-    assert(name[-17] == '_')
-    return int(name[-16:-4])
-
-
-def coco_num_to_name(num, split='train'):
-    if len(str(num)) > 12:
-        raise ValueError
-    if split == 'train':
-        return 'COCO_train2014_{}.jpg'.format(str(num).zfill(12))
-    elif split == 'val':
-        return 'COCO_val2014_{}.jpg'.format(str(num).zfill(12))
-    else:
-        raise ValueError('split must be train or val; got {}'.format(split))
+def save_checkpoint(cx_model, save_dir):
+    torch.save(cx_model.state_dict(), save_dir)
+    pass
 
 
 if __name__ == '__main__':
