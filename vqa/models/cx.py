@@ -41,30 +41,30 @@ class DistanceBaseline(nn.Module):
 # Helper models
 ################################################################################
 
-# Returns the fusion vector in addition to the answer
-class AbstractNoattCX(AbstractNoAtt):
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-    def forward(self, input_v, input_q):
-        x_q = self.seq2vec(input_q)
-        y = self._fusion(input_v, x_q)
-        a = self._classif(y)
-        return y, a
-
-
-# Same as MutanNoAtt but inherits from AbstractNoattCX
-class MutanNoAttCX(AbstractNoattCX):
-
-    def __init__(self, opt={}, vocab_words=[], vocab_answers=[]):
-        opt['fusion']['dim_h'] = opt['fusion']['dim_mm']
-        super().__init__(opt, vocab_words, vocab_answers)
-        self.fusion = fusion.MutanFusion(self.opt['fusion'])
-
-    def _fusion(self, input_v, input_q):
-        x = self.fusion(input_v, input_q)
-        return x
+# # Returns the fusion vector in addition to the answer
+# class AbstractNoattCX(AbstractNoAtt):
+#
+#     def __init__(self, *args, **kwargs):
+#         super().__init__(*args, **kwargs)
+#
+#     def forward(self, input_v, input_q):
+#         x_q = self.seq2vec(input_q)
+#         y = self._fusion(input_v, x_q)
+#         a = self._classif(y)
+#         return y, a
+#
+#
+# # Same as MutanNoAtt but inherits from AbstractNoattCX
+# class MutanNoAttCX(AbstractNoattCX):
+#
+#     def __init__(self, opt={}, vocab_words=[], vocab_answers=[]):
+#         opt['fusion']['dim_h'] = opt['fusion']['dim_mm']
+#         super().__init__(opt, vocab_words, vocab_answers)
+#         self.fusion = fusion.MutanFusion(self.opt['fusion'])
+#
+#     def _fusion(self, input_v, input_q):
+#         x = self.fusion(input_v, input_q)
+#         return x
 
 
 ################################################################################
@@ -143,13 +143,15 @@ class LinearContext(CXModelBase):
         super().__init__(*args, **kwargs)
         # TODO: will need to be able to switch this to eval during eval
         self.vqa_model.eval()
-        self.dim_y = self.vqa_model.module.opt['fusion']['dim_mm']
+        self.dim_y = self.vqa_model.opt['fusion']['dim_mm']
 
         self.linear = nn.Linear(self.knn_size * self.dim_y, self.knn_size)
 
     def forward(self, image_features, question_wids, answer_aids):
         a_orig, y_orig, a_knns, y_knns = self.vqa_forward(image_features, question_wids)
         y_knns = y_knns.detach()
+
+        # y_knns = Variable(torch.rand((image_features.size(0), self.knn_size, self.dim_y))).cuda()
 
         scores = self.linear(y_knns.view(-1, self.knn_size * self.dim_y))
         # TODO: dropout

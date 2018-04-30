@@ -9,6 +9,7 @@ import random
 import shutil
 import yaml
 
+from datetime import datetime
 from IPython.display import Image, display
 from pprint import pprint
 from tqdm import tqdm
@@ -44,7 +45,11 @@ parser.add_argument('-b', '--batch_size', type=int,
 parser.add_argument('--epochs', type=int,
                     help='number of total epochs to run')
 
-parser.add_argument('-c', '--comment', type=str)
+parser.add_argument('-c', '--comment', type=str, default=None)
+parser.add_argument('-p', '--print_freq', default=10, type=int,
+                    help='print frequency')
+parser.add_argument('-v', '--eval_freq', default=-1, type=int,
+                    help='eval frequency')
 
 parser.add_argument('-dev', '--dev_mode', action='store_true')
 
@@ -76,14 +81,13 @@ def main():
     print('=> Loading VQA dataset...')
     if args.dev_mode:
         trainset_fname = 'trainset_augmented_small.pickle'
-        valset_fname = 'valset_augmented_small.pickle'
     else:
         trainset_fname = 'trainset_augmented.pickle'
-        valset_fname = 'valset_augmented.pickle'
     trainset = pickle.load(open(os.path.join(options['vqa']['path_trainset'], trainset_fname), 'rb'))
 
-    if not args.dev_mode:
-        valset = pickle.load(open(os.path.join(options['vqa']['path_trainset'], valset_fname), 'rb'))
+    # if not args.dev_mode:
+    valset_fname = 'valset_augmented_small.pickle'
+    valset = pickle.load(open(os.path.join(options['vqa']['path_trainset'], valset_fname), 'rb'))
 
     print('=> Loading KNN data...')
     knns = json.load(open(options['coco']['path_knn'], 'r'))
@@ -93,9 +97,9 @@ def main():
     features_train = h5py.File(os.path.join(options['coco']['path_raw'], 'trainset.hdf5'), 'r').get('noatt')
     features_train = np.array(features_train)
 
-    if not args.dev_mode:
-        features_val = h5py.File(os.path.join(options['coco']['path_raw'], 'valset.hdf5'), 'r').get('noatt')
-        features_val = np.array(features_val)
+    # if not args.dev_mode:
+    features_val = h5py.File(os.path.join(options['coco']['path_raw'], 'valset.hdf5'), 'r').get('noatt')
+    features_val = np.array(features_val)
 
     #########################################################################################
     # Create model
@@ -106,9 +110,10 @@ def main():
     vqa_model = models.factory(options['model'],
                                trainset['vocab_words'], trainset['vocab_answers'],
                                cuda=True, data_parallel=True)
+    vqa_model = vqa_model.module
 
     if not args.dev_mode:
-        start_epoch, best_acc1, exp_logger = load_checkpoint(vqa_model.module, None, os.path.join(options['logs']['dir_logs'], 'best'))
+        start_epoch, best_acc1, exp_logger = load_checkpoint(vqa_model, None, os.path.join(options['logs']['dir_logs'], 'best'))
 
     # cx_model = BlackBox(vqa_model, knn_size=24)
     cx_model = LinearContext(vqa_model, knn_size=24)
@@ -117,46 +122,87 @@ def main():
     #########################################################################################
     # Train loop
     #########################################################################################
+    print('=> Starting training...')
 
     optimizer = torch.optim.Adam(cx_model.parameters(), lr=1e-4)
-    criterion = nn.CrossEntropyLoss()
-    writer = SummaryWriter()
 
-    for epoch in range(0, options['optim']['epochs']):
+    log_dir = os.path.join('runs', datetime.now().strftime('%b%d_%H-%M-%S') + '_' + args.comment)
+    print('Logging results to {}'.format(log_dir))
+
+    for epoch in range(1, options['optim']['epochs'] + 1):
 
         # TRAIN
-        total_examples = total_correct = 0
         cx_model.train()
+        vqa_model.eval()
 
-        for batch in tqdm(batchify(trainset['examples_list'], batch_size=options['optim']['batch_size'])):
-            batch_size = len(batch)
+        for p in vqa_model.parameters():
+            p.requires_grad = False
+
+        train_i = train_b = train_correct = 0
+
+        criterion = nn.CrossEntropyLoss(size_average=False)
+
+        trainset_batched = batchify(trainset['examples_list'], batch_size=options['optim']['batch_size'])
+        for batch in tqdm(trainset_batched):
             image_features, question_wids, answer_aids, comp_idxs = getDataFromBatch(batch, features_train, trainset['name_to_index'])
 
             scores = cx_model(image_features, question_wids, answer_aids)
 
-            loss = criterion(scores, comp_idxs)
+            loss = criterion(scores, comp_idxs) / len(batch)
 
             correct = recallAtK(scores, comp_idxs, k=5)
 
-            total_examples += batch_size
-            total_correct += correct.sum()
+            train_b += 1
+            train_i += len(batch)
+            train_correct += correct.sum()
 
+            optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
-            # for name, p in cx_model.named_parameters():
-            #     print(name, p.grad)
+            if train_b % args.print_freq == 0:
+                log_results(log_dir, mode='train', epoch=epoch, i=(epoch - 1) + train_b, loss=float(loss), recall=(train_correct / train_i))
 
-            if total_examples % 100 == 0 or total_examples == len(trainset['examples_list']):
-                recall = total_correct / total_examples
-                print("Epoch {} ({}/{}): Loss: {:.2f}, Recall@5: {:.4f}".format(epoch, total_examples, len(trainset['examples_list']), float(loss), recall))
-
-                ex_num = (epoch * len(trainset['examples_list'])) + total_examples
-                writer.add_scalar('recall@5', recall, ex_num)
-                writer.add_scalar('loss_train', loss, ex_num)
+            if (args.eval_freq > 0 and train_b % args.eval_freq == 0) or train_b == len(trainset_batched):
+                print('Eval...')
+                eval_results = eval_model(cx_model, valset, features_val, options['optim']['batch_size'])
+                log_results(log_dir, mode='val', epoch=epoch, i=(epoch - 1) + train_b, loss=eval_results['loss'], recall=eval_results['recall_5'])
 
 
-       #TODO: Val
+def eval_model(cx_model, valset, features_val, batch_size):
+    cx_model.eval()
+
+    val_i = val_correct = val_loss = 0
+
+    criterion = nn.CrossEntropyLoss(size_average=False)
+
+    valset_batched = batchify(valset['examples_list'], batch_size=batch_size)
+    for batch in tqdm(valset_batched):
+        image_features, question_wids, answer_aids, comp_idxs = getDataFromBatch(batch, features_val, valset['name_to_index'])
+
+        scores = cx_model(image_features, question_wids, answer_aids)
+
+        val_loss += float(criterion(scores, comp_idxs))
+
+        correct = recallAtK(scores, comp_idxs, k=5)
+        val_correct += correct.sum()
+
+        val_i += len(batch)
+
+
+    results = {
+        'loss': (val_loss / val_i),
+        'recall_5': (val_correct / val_i)
+    }
+
+    return results
+
+
+def log_results(log_dir, mode, epoch, i, loss, recall):
+    print("Epoch {} {}: Loss: {:.2f}, Recall@5: {:.4f}".format(epoch, mode, loss, recall))
+    writer = SummaryWriter(log_dir=os.path.join(log_dir, mode))
+    writer.add_scalar('loss', loss, i)
+    writer.add_scalar('recall@5', recall, i)
 
 
 def batchify(example_list, batch_size, shuffle=True):
@@ -182,6 +228,7 @@ def getDataFromBatch(batch, features, name_to_index):
         answer_aids.append(ex['answer_aid'])
         comp_idxs.append(ex['comp']['knn_index'])
 
+    # TODO: Make call to .cuda() conditional on model type
     image_features = torch.from_numpy(np.array([features[idxs] for idxs in image_idxs])).cuda()
     question_wids = torch.LongTensor(question_wids).cuda()
     answer_aids = torch.LongTensor(answer_aids).cuda()
