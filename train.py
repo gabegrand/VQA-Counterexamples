@@ -320,8 +320,8 @@ def save_checkpoint(info, model, optim, dir_logs, save_model, save_all_from=None
         torch.save(info, path_ckpt_info.format(info['epoch']))
         # save model state & optim state
         if save_model:
-            torch.save(model, path_ckpt_model.format(info['epoch']))
-            torch.save(optim, path_ckpt_optim.format(info['epoch']))
+            torch.save(model.state_dict(), path_ckpt_model.format(info['epoch']))
+            torch.save(optim.state_dict(), path_ckpt_optim.format(info['epoch']))
         if  info['epoch'] > 1 and info['epoch'] < save_all_from + 1:
             os.system('rm ' + path_ckpt_info.format(info['epoch'] - 1))
             os.system('rm ' + path_ckpt_model.format(info['epoch'] - 1))
@@ -362,7 +362,7 @@ def load_checkpoint(model, optimizer, path_ckpt):
         optimizer.load_state_dict(optim_state)
     else:
         print("Warning train.py: no optim checkpoint found at '{}'".format(path_ckpt_optim))
-    print("=> loaded checkpoint '{}' (epoch {}, best_acc1 {})"
+    print("=> loaded checkpoint '{}' (epoch {}, best_acc1 {:.4f})"
               .format(path_ckpt, start_epoch, best_acc1))
     return start_epoch, best_acc1, exp_logger
 

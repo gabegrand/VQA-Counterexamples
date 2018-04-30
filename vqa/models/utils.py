@@ -6,7 +6,7 @@ import torchvision.models as models
 
 from .noatt import MLBNoAtt, MutanNoAtt
 from .att import MLBAtt, MutanAtt
-from .cx import MutanNoAttCX
+# from .cx import MutanNoAttCX
 
 model_names = sorted(name for name in sys.modules[__name__].__dict__
     if not name.startswith("__"))# and 'Att' in name)

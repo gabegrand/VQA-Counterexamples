@@ -30,9 +30,9 @@ class AbstractNoAtt(nn.Module):
 
     def forward(self, input_v, input_q):
         x_q = self.seq2vec(input_q)
-        x = self._fusion(input_v, x_q)
-        x = self._classif(x)
-        return x
+        z = self._fusion(input_v, x_q)
+        x = self._classif(z)
+        return z, x
 
 
 class MLBNoAtt(AbstractNoAtt):
@@ -56,4 +56,3 @@ class MutanNoAtt(AbstractNoAtt):
     def _fusion(self, input_v, input_q):
         x = self.fusion(input_v, input_q)
         return x
-
