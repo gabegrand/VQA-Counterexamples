@@ -50,7 +50,7 @@ parser.add_argument('--resume', default='', type=str,
 parser.add_argument('--best', action='store_true',
                     help='whether to resume best checkpoint')
 
-parser.add_argument('-c', '--comment', type=str, default=None)
+parser.add_argument('-c', '--comment', type=str, default='')
 parser.add_argument('-p', '--print_freq', default=10, type=int,
                     help='print frequency')
 parser.add_argument('-v', '--eval_freq', default=-1, type=int,
@@ -95,7 +95,9 @@ def main():
             i += 1
             log_dir = os.path.join('runs', run_name, 'resume_{}'.format(i))
     else:
-        run_name = datetime.now().strftime('%b%d-%H-%M-%S') + '_' + args.comment
+        run_name = datetime.now().strftime('%b%d-%H-%M-%S')
+        if args.comment:
+            run_name += '_' + args.comment
         save_dir = os.path.join('logs', 'cx', run_name)
         if os.path.isdir(save_dir):
             if click.confirm('Save directory already exists in {}. Erase?'.format(save_dir)):
@@ -122,11 +124,11 @@ def main():
         trainset_fname = 'trainset_augmented_small.pickle'
     else:
         trainset_fname = 'trainset_augmented.pickle'
-    trainset = pickle.load(open(os.path.join(options['vqa']['path_trainset'], trainset_fname), 'rb'))
+    trainset = pickle.load(open(os.path.join(options['vqa']['path_trainset'], 'pickle_old', trainset_fname), 'rb'))
 
     # if not args.dev_mode:
     valset_fname = 'valset_augmented_small.pickle'
-    valset = pickle.load(open(os.path.join(options['vqa']['path_trainset'], valset_fname), 'rb'))
+    valset = pickle.load(open(os.path.join(options['vqa']['path_trainset'], 'pickle_old', valset_fname), 'rb'))
 
     print('=> Loading KNN data...')
     knns = json.load(open(options['coco']['path_knn'], 'r'))
@@ -172,19 +174,18 @@ def main():
 
     for epoch in range(start_epoch, options['optim']['epochs'] + 1):
 
-        # TRAIN
-        cx_model.train()
-        vqa_model.eval()
-
-        for p in vqa_model.parameters():
-            p.requires_grad = False
-
         train_b = 0
 
         criterion = nn.CrossEntropyLoss(size_average=False)
 
-        trainset_batched = batchify(trainset['examples_list'], batch_size=options['optim']['batch_size'])[:10]
+        trainset_batched = batchify(trainset['examples_list'], batch_size=options['optim']['batch_size'])
         for batch in tqdm(trainset_batched):
+            # TRAIN
+            cx_model.train()
+            vqa_model.eval()
+            for p in vqa_model.parameters():
+                p.requires_grad = False
+
             image_features, question_wids, answer_aids, comp_idxs = getDataFromBatch(batch, features_train, trainset['name_to_index'])
 
             scores = cx_model(image_features, question_wids, answer_aids)
@@ -224,7 +225,7 @@ def eval_model(cx_model, valset, features_val, batch_size):
 
     criterion = nn.CrossEntropyLoss(size_average=False)
 
-    valset_batched = batchify(valset['examples_list'], batch_size=batch_size)[:10]
+    valset_batched = batchify(valset['examples_list'], batch_size=batch_size)
     for batch in tqdm(valset_batched):
         image_features, question_wids, answer_aids, comp_idxs = getDataFromBatch(batch, features_val, valset['name_to_index'])
         scores = cx_model(image_features, question_wids, answer_aids)

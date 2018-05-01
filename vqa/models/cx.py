@@ -151,8 +151,6 @@ class LinearContext(CXModelBase):
         a_orig, y_orig, a_knns, y_knns = self.vqa_forward(image_features, question_wids)
         y_knns = y_knns.detach()
 
-        # y_knns = Variable(torch.rand((image_features.size(0), self.knn_size, self.dim_y))).cuda()
-
         scores = self.linear(y_knns.view(-1, self.knn_size * self.dim_y))
         # TODO: dropout
 
