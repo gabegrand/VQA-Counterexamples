@@ -28,7 +28,7 @@ import vqa.lib.logger as logger
 import vqa.lib.criterions as criterions
 import vqa.datasets as datasets
 import vqa.models as models
-from vqa.models.cx import RandomBaseline, DistanceBaseline, BlackBox, LinearContext
+from vqa.models.cx import RandomBaseline, DistanceBaseline, BlackBox, LinearContext, CXModelBase
 
 from train import load_checkpoint as load_vqa_checkpoint
 
@@ -120,14 +120,11 @@ def main():
     #########################################################################################
 
     print('=> Loading VQA dataset...')
-    if args.dev_mode:
-        trainset_fname = 'trainset_augmented_small.pickle'
-    else:
-        trainset_fname = 'trainset_augmented.pickle'
+    trainset_fname = 'trainset_augmented.pickle'
     trainset = pickle.load(open(os.path.join(options['vqa']['path_trainset'], 'pickle_old', trainset_fname), 'rb'))
 
     # if not args.dev_mode:
-    valset_fname = 'valset_augmented_small.pickle'
+    valset_fname = 'valset_augmented.pickle'
     valset = pickle.load(open(os.path.join(options['vqa']['path_trainset'], 'pickle_old', valset_fname), 'rb'))
 
     print('=> Loading KNN data...')
@@ -154,7 +151,8 @@ def main():
 
     load_vqa_checkpoint(vqa_model, None, os.path.join(options['logs']['dir_logs'], 'best'))
 
-    cx_model = LinearContext(vqa_model, knn_size=24)
+    # cx_model = LinearContext(vqa_model, knn_size=24)
+    cx_model = CXModelBase(vqa_model, knn_size=24)
 
     if args.resume:
         info, start_epoch, best_recall = load_cx_checkpoint(cx_model, save_dir, resume_best=args.best)
@@ -168,54 +166,71 @@ def main():
     #########################################################################################
     # Train loop
     #########################################################################################
-    print('=> Starting training...')
+    with h5py.File("vqa_trainset_cached.hdf5", "w") as f:
+        a_dset = f.create_dataset("answers", (len(trainset['examples_list']), 25, 2000), 'f')
+        y_dset = f.create_dataset("context", (len(trainset['examples_list']), 25, 360), 'f')
+        q_dset = f.create_dataset("q_ids", (len(trainset['examples_list']),), 'i')
 
-    optimizer = torch.optim.Adam(cx_model.parameters(), lr=1e-4)
+        print('=> Starting training...')
+        for epoch in range(start_epoch, options['optim']['epochs'] + 1):
 
-    for epoch in range(start_epoch, options['optim']['epochs'] + 1):
+            train_b = 0
 
-        train_b = 0
+            trainset_batched = batchify(trainset['examples_list'], batch_size=options['optim']['batch_size'], shuffle=False)
+            for batch in tqdm(trainset_batched):
+                # TRAIN
+                cx_model.eval()
+                vqa_model.eval()
+                for p in vqa_model.parameters():
+                    p.requires_grad = False
 
-        criterion = nn.CrossEntropyLoss(size_average=False)
+                image_features, question_wids, answer_aids, comp_idxs = getDataFromBatch(batch, features_train, trainset['name_to_index'])
 
-        trainset_batched = batchify(trainset['examples_list'], batch_size=options['optim']['batch_size'])
-        for batch in tqdm(trainset_batched):
-            # TRAIN
-            cx_model.train()
-            vqa_model.eval()
-            for p in vqa_model.parameters():
-                p.requires_grad = False
+                bsz = image_features.size(0)
 
-            image_features, question_wids, answer_aids, comp_idxs = getDataFromBatch(batch, features_train, trainset['name_to_index'])
+                a_orig, y_orig, a_knns, y_knns = cx_model.vqa_forward(image_features, question_wids)
 
-            scores = cx_model(image_features, question_wids, answer_aids)
+                a = torch.cat((a_orig.view(-1, 1, 2000), a_knns), dim=1).data.cpu()
+                y = torch.cat((y_orig.view(-1, 1, 360), y_knns), dim=1).data.cpu()
 
-            loss = criterion(scores, comp_idxs) / len(batch)
+                a_dset[64 * train_b:(64 * train_b)+bsz] = a
+                y_dset[64 * train_b:(64 * train_b)+bsz] = y
+                q_dset[64 * train_b:(64 * train_b)+bsz] = np.array([ex['question_id'] for ex in batch])
 
-            correct = recallAtK(scores, comp_idxs, k=5)
+                train_b += 1
 
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+    with h5py.File("vqa_valset_cached.hdf5", "w") as f:
+        a_dset = f.create_dataset("answers", (len(valset['examples_list']), 25, 2000), 'f')
+        y_dset = f.create_dataset("context", (len(valset['examples_list']), 25, 360), 'f')
+        q_dset = f.create_dataset("q_ids", (len(valset['examples_list']),), 'i')
 
-            train_b += 1
+        print('=> Starting training...')
+        for epoch in range(start_epoch, options['optim']['epochs'] + 1):
 
-            if train_b % args.print_freq == 0:
-                log_results(train_writer, mode='train', epoch=epoch, i=((epoch - 1) * len(trainset_batched)) + train_b, loss=float(loss), recall=(correct.sum() / len(batch)))
+            val_b = 0
 
-            if (args.eval_freq > 0 and train_b % args.eval_freq == 0) or train_b == len(trainset_batched):
-                eval_results = eval_model(cx_model, valset, features_val, options['optim']['batch_size'])
-                log_results(val_writer, mode='val', epoch=epoch, i=((epoch - 1) * len(trainset_batched)) + train_b, loss=eval_results['loss'], recall=eval_results['recall_5'])
+            valset_batched = batchify(valset['examples_list'], batch_size=options['optim']['batch_size'], shuffle=False)
+            for batch in tqdm(valset_batched):
+                # TRAIN
+                cx_model.eval()
+                vqa_model.eval()
+                for p in vqa_model.parameters():
+                    p.requires_grad = False
 
-        info.append(eval_results)
+                image_features, question_wids, answer_aids, comp_idxs = getDataFromBatch(batch, features_val, valset['name_to_index'])
 
-        if info[-1]['recall_5'] > best_recall:
-            is_best = True
-            best_recall = info[-1]['recall_5']
-        else:
-            is_best = False
+                bsz = image_features.size(0)
 
-        save_cx_checkpoint(cx_model, info, save_dir, is_best=is_best)
+                a_orig, y_orig, a_knns, y_knns = cx_model.vqa_forward(image_features, question_wids)
+
+                a = torch.cat((a_orig.view(-1, 1, 2000), a_knns), dim=1).data.cpu()
+                y = torch.cat((y_orig.view(-1, 1, 360), y_knns), dim=1).data.cpu()
+
+                a_dset[64 * val_b:(64 * val_b)+bsz] = a
+                y_dset[64 * val_b:(64 * val_b)+bsz] = y
+                q_dset[64 * val_b:(64 * val_b)+bsz] = np.array([ex['question_id'] for ex in batch])
+
+                val_b += 1
 
 
 def eval_model(cx_model, valset, features_val, batch_size):
