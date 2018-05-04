@@ -28,7 +28,7 @@ import vqa.lib.logger as logger
 import vqa.lib.criterions as criterions
 import vqa.datasets as datasets
 import vqa.models as models
-from vqa.models.cx import RandomBaseline, DistanceBaseline, BlackBox, LinearContext
+from vqa.models.cx import RandomBaseline, DistanceBaseline, BlackBox, LinearContext, PairwiseModel
 
 from train import load_checkpoint as load_vqa_checkpoint
 
@@ -55,6 +55,9 @@ parser.add_argument('-p', '--print_freq', default=10, type=int,
                     help='print frequency')
 parser.add_argument('-v', '--eval_freq', default=-1, type=int,
                     help='eval frequency')
+
+parser.add_argument('--pairwise', action='store_true', help='Pairwise training')
+parser.add_argument('--cached', action='store_true', help='Use cached VQA outputs')
 
 parser.add_argument('-dev', '--dev_mode', action='store_true')
 
@@ -142,6 +145,11 @@ def main():
     features_val = h5py.File(os.path.join(options['coco']['path_raw'], 'valset.hdf5'), 'r').get('noatt')
     features_val = np.array(features_val)
 
+    if args.cached:
+        print('=> Loading cached VQA model outputs...')
+        cache_train = h5py.File('data/cx/vqa_trainset_cached.hdf5', 'r')
+        cache_val = h5py.File('data/cx/vqa_valset_cached.hdf5', 'r')
+
     #########################################################################################
     # Create model
     #########################################################################################
@@ -155,6 +163,7 @@ def main():
     load_vqa_checkpoint(vqa_model, None, os.path.join(options['logs']['dir_logs'], 'best'))
 
     cx_model = LinearContext(vqa_model, knn_size=24)
+    # cx_model = PairwiseModel(vqa_model, knn_size=24)
 
     if args.resume:
         info, start_epoch, best_recall = load_cx_checkpoint(cx_model, save_dir, resume_best=args.best)
@@ -169,6 +178,9 @@ def main():
     # Train loop
     #########################################################################################
     print('=> Starting training...')
+
+    if args.pairwise:
+        print('==> Pairwise training')
 
     optimizer = torch.optim.Adam(cx_model.parameters(), lr=1e-4)
 
@@ -186,13 +198,16 @@ def main():
             for p in vqa_model.parameters():
                 p.requires_grad = False
 
-            image_features, question_wids, answer_aids, comp_idxs = getDataFromBatch(batch, features_train, trainset['name_to_index'])
+            image_features, question_wids, answer_aids, comp_idxs = getDataFromBatch(batch, features_train, trainset['name_to_index'], pairwise=args.pairwise)
 
             scores = cx_model(image_features, question_wids, answer_aids)
 
             loss = criterion(scores, comp_idxs) / len(batch)
 
-            correct = recallAtK(scores, comp_idxs, k=5)
+            if args.pairwise:
+                correct = recallAtK(scores, comp_idxs, k=1)
+            else:
+                correct = recallAtK(scores, comp_idxs, k=5)
 
             optimizer.zero_grad()
             loss.backward()
@@ -204,21 +219,21 @@ def main():
                 log_results(train_writer, mode='train', epoch=epoch, i=((epoch - 1) * len(trainset_batched)) + train_b, loss=float(loss), recall=(correct.sum() / len(batch)))
 
             if (args.eval_freq > 0 and train_b % args.eval_freq == 0) or train_b == len(trainset_batched):
-                eval_results = eval_model(cx_model, valset, features_val, options['optim']['batch_size'])
-                log_results(val_writer, mode='val', epoch=epoch, i=((epoch - 1) * len(trainset_batched)) + train_b, loss=eval_results['loss'], recall=eval_results['recall_5'])
+                eval_results = eval_model(cx_model, valset, features_val, options['optim']['batch_size'], pairwise=args.pairwise)
+                log_results(val_writer, mode='val', epoch=epoch, i=((epoch - 1) * len(trainset_batched)) + train_b, loss=eval_results['loss'], recall=eval_results['recall'])
 
         info.append(eval_results)
 
-        if info[-1]['recall_5'] > best_recall:
+        if info[-1]['recall'] > best_recall:
             is_best = True
-            best_recall = info[-1]['recall_5']
+            best_recall = info[-1]['recall']
         else:
             is_best = False
 
         save_cx_checkpoint(cx_model, info, save_dir, is_best=is_best)
 
 
-def eval_model(cx_model, valset, features_val, batch_size):
+def eval_model(cx_model, valset, features_val, batch_size, pairwise=False):
     cx_model.eval()
 
     val_i = val_correct = val_loss = 0
@@ -227,27 +242,31 @@ def eval_model(cx_model, valset, features_val, batch_size):
 
     valset_batched = batchify(valset['examples_list'], batch_size=batch_size)
     for batch in tqdm(valset_batched):
-        image_features, question_wids, answer_aids, comp_idxs = getDataFromBatch(batch, features_val, valset['name_to_index'])
+        image_features, question_wids, answer_aids, comp_idxs = getDataFromBatch(batch, features_val, valset['name_to_index'], pairwise)
         scores = cx_model(image_features, question_wids, answer_aids)
 
         val_loss += float(criterion(scores, comp_idxs))
-        correct = recallAtK(scores, comp_idxs, k=5)
+
+        if pairwise:
+            correct = recallAtK(scores, comp_idxs, k=1)
+        else:
+            correct = recallAtK(scores, comp_idxs, k=5)
         val_correct += correct.sum()
 
         val_i += len(batch)
 
     results = {
         'loss': (val_loss / val_i),
-        'recall_5': (val_correct / val_i)
+        'recall': (val_correct / val_i)
     }
 
     return results
 
 
 def log_results(writer, mode, epoch, i, loss, recall):
-    print("Epoch {} {}: Loss: {:.2f}, Recall@5: {:.4f}".format(epoch, mode, loss, recall))
+    print("Epoch {} {}: Loss: {:.2f}, Recall: {:.4f}".format(epoch, mode, loss, recall))
     writer.add_scalar('loss', loss, i)
-    writer.add_scalar('recall_5', recall, i)
+    writer.add_scalar('recall', recall, i)
 
 
 def recallAtK(scores, ground_truth, k=5):
@@ -267,7 +286,7 @@ def batchify(example_list, batch_size, shuffle=True):
     return batched_dataset
 
 
-def getDataFromBatch(batch, features, name_to_index):
+def getDataFromBatch(batch, features, name_to_index, pairwise=False):
     image_idxs = []
     question_wids = []
     answer_aids = []
@@ -276,10 +295,19 @@ def getDataFromBatch(batch, features, name_to_index):
     for ex in batch:
         image_idx = [name_to_index[ex['image_name']]]
         knn_idxs = [name_to_index[name] for name in ex['knns']]
+        if pairwise:
+            comp_idx = knn_idxs[ex['comp']['knn_index']]
+            knn_idxs.remove(comp_idx)
+            # TODO: Weight this sample
+            other_idx = random.choice(knn_idxs)
+            knn_idxs = [comp_idx, other_idx]
         image_idxs.append(image_idx + knn_idxs)
         question_wids.append(ex['question_wids'])
         answer_aids.append(ex['answer_aid'])
         comp_idxs.append(ex['comp']['knn_index'])
+
+    if pairwise:
+        comp_idxs = [0 for _ in range(len(batch))]
 
     # TODO: Make call to .cuda() conditional on model type
     image_features = torch.from_numpy(np.array([features[idxs] for idxs in image_idxs])).cuda()
@@ -320,7 +348,15 @@ def load_cx_checkpoint(cx_model, save_dir, resume_best=True):
     last_epoch = len(info)
     print('Epoch {}: {}'.format(last_epoch, info[-1]))
 
-    return info, last_epoch + 1, info[-1]['recall_5']
+    return info, last_epoch + 1, info[-1]['recall']
+
+
+def check_grad(cx_model):
+    for name, p in cx_model.named_parameters():
+        if p.grad is not None:
+            print(name, p.grad.norm())
+        else:
+            print(name, "None")
 
 
 if __name__ == '__main__':
