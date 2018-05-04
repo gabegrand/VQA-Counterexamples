@@ -44,15 +44,14 @@ class DistanceBaseline(nn.Module):
 
 class CXModelBase(nn.Module):
 
-    def __init__(self, vqa_model, knn_size, cache_train=None, cache_val=None):
+    def __init__(self, vqa_model, knn_size, trainable_vqa=False):
         super().__init__()
 
         self.vqa_model = vqa_model
-        self.vqa_model.eval()
+        self.trainable_vqa = trainable_vqa
 
-        self.cache_train = cache_train
-        self.cache_val = cache_val
-        self.use_cache = self.cache_train is not None and self.cache_val is not None
+        if not self.trainable_vqa:
+            self.vqa_model.eval()
 
         self.knn_size = knn_size
 
@@ -61,32 +60,39 @@ class CXModelBase(nn.Module):
         batch_size = image_features.size(0)
 
         # Process all image features as a single batch
-        image_input = Variable(image_features.view(batch_size * (self.knn_size + 1), -1))
+        v_emb = Variable(image_features.view(batch_size * (self.knn_size + 1), -1))
+        q_emb = self.vqa_model.seq2vec(Variable(question_wids))
+
+        if self.trainable_vqa:
+            v_emb.requires_grad = True
+            q_emb.requires_grad = True
+        else:
+            # TODO: Unclear if this is redundant, but better safe than sorry
+            self.vqa_model.eval()
+            for p in self.vqa_model.parameters():
+                p.requires_grad = False
 
         # Duplicate each question knn_size + 1 times
-        question_input = question_wids.view(batch_size, 1, -1).expand(batch_size, self.knn_size + 1, -1).contiguous()
-        question_input = Variable(question_input.view(batch_size * (self.knn_size + 1), -1))
+        q_emb = q_emb.view(batch_size, 1, -1).expand(batch_size, self.knn_size + 1, -1).contiguous().view(batch_size * (self.knn_size + 1), -1)
 
         # Run the VQA model
-        y, a = self.vqa_model(image_input, question_input)
-        a = a.view(batch_size, self.knn_size + 1, -1)
-        y = y.view(batch_size, self.knn_size + 1, -1)
+        z = self.vqa_model._fusion(v_emb, q_emb)
+        a = self.vqa_model._classif(z)
 
-        a = a.detach().data
-        y = y.detach().data
+        a = a.view(batch_size, self.knn_size + 1, -1)
+        z = z.view(batch_size, self.knn_size + 1, -1)
+
+        if not self.trainable_vqa:
+            a = a.detach().data
+            z = z.detach().data
 
         # Separate results into original and knns
         a_orig = Variable(a[:, 0, :].contiguous(), requires_grad=True)
-        y_orig = Variable(y[:, 0, :].contiguous(), requires_grad=True)
+        z_orig = Variable(z[:, 0, :].contiguous(), requires_grad=True)
         a_knns = Variable(a[:, 1:, :].contiguous(), requires_grad=True)
-        y_knns = Variable(y[:, 1:, :].contiguous(), requires_grad=True)
+        z_knns = Variable(z[:, 1:, :].contiguous(), requires_grad=True)
 
-        return a_orig, y_orig, a_knns, y_knns
-
-    def _vqa_forward_cached(self, image_features, question_wids):
-        assert(image_features.size(1) == self.knn_size + 1)
-        batch_size = image_features.size(0)
-        pass
+        return a_orig, z_orig, a_knns, z_knns
 
 
     def forward(self, image_features, question_wids, answer_aids):
@@ -112,8 +118,6 @@ class BlackBox(CXModelBase):
             scores_list.append(a_knns[i, :, a_idx])
         scores = torch.stack(scores_list, dim=0)
 
-        print(scores.shape)
-
         # Flip the sign, since the highest scoring items are the worst counterexamples
         scores = -scores
 
@@ -124,18 +128,16 @@ class LinearContext(CXModelBase):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # TODO: will need to be able to switch this to eval during eval
-        self.vqa_model.eval()
-        self.dim_y = self.vqa_model.opt['fusion']['dim_mm']
+        self.dim_z = self.vqa_model.opt['fusion']['dim_mm']
 
-        self.linear = nn.Linear(self.knn_size * self.dim_y, self.knn_size)
+        self.linear = nn.Linear(self.knn_size * self.dim_z, self.knn_size)
 
     def forward(self, image_features, question_wids, answer_aids):
-        a_orig, y_orig, a_knns, y_knns = self.vqa_forward(image_features, question_wids)
+        a_orig, z_orig, a_knns, z_knns = self.vqa_forward(image_features, question_wids)
 
-        assert(y_knns.requires_grad)
+        assert(z_knns.requires_grad)
 
-        scores = self.linear(y_knns.view(-1, self.knn_size * self.dim_y))
+        scores = self.linear(z_knns.view(-1, self.knn_size * self.dim_z))
         # TODO: dropout
 
         return scores
@@ -149,7 +151,7 @@ class PairwiseModel(CXModelBase):
         self.vqa_model.eval()
         self.dim_v = self.vqa_model.opt['fusion']['dim_v']
         self.dim_q = self.vqa_model.opt['fusion']['dim_q']
-        self.dim_y = self.vqa_model.opt['fusion']['dim_mm']
+        self.dim_z = self.vqa_model.opt['fusion']['dim_mm']
 
         self.dim_h = 300
 

@@ -32,7 +32,7 @@ class AbstractNoAtt(nn.Module):
         x_q = self.seq2vec(input_q)
         z = self._fusion(input_v, x_q)
         x = self._classif(z)
-        return z, x
+        return x
 
 
 class MLBNoAtt(AbstractNoAtt):

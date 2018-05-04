@@ -21,7 +21,7 @@ def train(loader, model, criterion, optimizer, logger, epoch, print_freq=10):
         target_answer  = Variable(sample['answer'].cuda(async=True))
 
         # compute output
-        _, output = model(input_visual, input_question)
+        output = model(input_visual, input_question)
         torch.cuda.synchronize()
         loss = criterion(output, target_answer)
         meters['loss'].update(loss.data[0], n=batch_size)
@@ -77,7 +77,7 @@ def validate(loader, model, criterion, logger, epoch=0, print_freq=10):
         target_answer  = Variable(sample['answer'].cuda(async=True), volatile=True)
 
         # compute output
-        _, output = model(input_visual, input_question)
+        output = model(input_visual, input_question)
         loss = criterion(output, target_answer)
         meters['loss'].update(loss.data[0], n=batch_size)
 
@@ -128,7 +128,7 @@ def test(loader, model, logger, epoch=0, print_freq=10):
         input_question = Variable(sample['question'].cuda(async=True), volatile=True)
 
         # compute output
-        _, output = model(input_visual, input_question)
+        output = model(input_visual, input_question)
 
         # compute predictions for OpenEnded accuracy
         _, pred = output.data.cpu().max(1)

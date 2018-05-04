@@ -57,7 +57,7 @@ parser.add_argument('-v', '--eval_freq', default=-1, type=int,
                     help='eval frequency')
 
 parser.add_argument('--pairwise', action='store_true', help='Pairwise training')
-parser.add_argument('--cached', action='store_true', help='Use cached VQA outputs')
+parser.add_argument('--trainable_vqa', action='store_true', help='If true, backprop through VQA model')
 
 parser.add_argument('-dev', '--dev_mode', action='store_true')
 
@@ -145,11 +145,6 @@ def main():
     features_val = h5py.File(os.path.join(options['coco']['path_raw'], 'valset.hdf5'), 'r').get('noatt')
     features_val = np.array(features_val)
 
-    if args.cached:
-        print('=> Loading cached VQA model outputs...')
-        cache_train = h5py.File('data/cx/vqa_trainset_cached.hdf5', 'r')
-        cache_val = h5py.File('data/cx/vqa_valset_cached.hdf5', 'r')
-
     #########################################################################################
     # Create model
     #########################################################################################
@@ -160,7 +155,7 @@ def main():
                                cuda=True, data_parallel=True)
     vqa_model = vqa_model.module
 
-    load_vqa_checkpoint(vqa_model, None, os.path.join(options['logs']['dir_logs'], 'best'))
+    # load_vqa_checkpoint(vqa_model, None, os.path.join(options['logs']['dir_logs'], 'best'))
 
     cx_model = LinearContext(vqa_model, knn_size=24)
     # cx_model = PairwiseModel(vqa_model, knn_size=24)
@@ -182,9 +177,15 @@ def main():
     if args.pairwise:
         print('==> Pairwise training')
 
-    optimizer = torch.optim.Adam(cx_model.parameters(), lr=1e-4)
+    optimizer = torch.optim.Adam(cx_model.parameters(), lr=options['optim']['lr'])
 
     for epoch in range(start_epoch, options['optim']['epochs'] + 1):
+
+        cx_model.train()
+        if args.trainable_vqa:
+            vqa_model.eval()
+        else:
+            vqa_model.train()
 
         train_b = 0
 
@@ -192,11 +193,7 @@ def main():
 
         trainset_batched = batchify(trainset['examples_list'], batch_size=options['optim']['batch_size'])
         for batch in tqdm(trainset_batched):
-            # TRAIN
-            cx_model.train()
-            vqa_model.eval()
-            for p in vqa_model.parameters():
-                p.requires_grad = False
+            assert(cx_model.training)
 
             image_features, question_wids, answer_aids, comp_idxs = getDataFromBatch(batch, features_train, trainset['name_to_index'], pairwise=args.pairwise)
 
@@ -259,6 +256,8 @@ def eval_model(cx_model, valset, features_val, batch_size, pairwise=False):
         'loss': (val_loss / val_i),
         'recall': (val_correct / val_i)
     }
+
+    cx_model.train()
 
     return results
 
