@@ -39,6 +39,10 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--path_opt', default='options/vqa2/counterexamples_default.yaml',
                     type=str, help='path to a yaml options file')
 
+parser.add_argument('-cx', '--cx_model', required=True,
+                    type=str, help='Counterexample model type')
+
+
 parser.add_argument('-lr', '--learning_rate', type=float,
                     help='initial learning rate')
 parser.add_argument('-b', '--batch_size', type=int,
@@ -58,6 +62,12 @@ parser.add_argument('-v', '--eval_freq', default=-1, type=int,
                     help='eval frequency')
 
 parser.add_argument('--pairwise', action='store_true', help='Pairwise training')
+
+group = parser.add_mutually_exclusive_group(required=False)
+group.add_argument('--pretrained_vqa', dest='pretrained_vqa', action='store_true')
+group.add_argument('--untrained_vqa', dest='pretrained_vqa', action='store_false')
+parser.set_defaults(pretrained=True)
+
 parser.add_argument('--trainable_vqa', action='store_true', help='If true, backprop through VQA model')
 
 parser.add_argument('-dev', '--dev_mode', action='store_true')
@@ -151,19 +161,37 @@ def main():
     #########################################################################################
     print('=> Building model...')
 
-    vqa_model = models.factory(options['model'],
-                               trainset['vocab_words'], trainset['vocab_answers'],
-                               cuda=True, data_parallel=True)
-    vqa_model = vqa_model.module
+    vqa_model = None
+    optimizer = None
+    if args.cx_model == "RandomBaseline":
+        cx_model = RandomBaseline(knn_size=24)
+    elif args.cx_model == "DistanceBaseline":
+        cx_model = DistanceBaseline(knn_size=24)
+    else:
+        vqa_model = models.factory(options['model'],
+                                   trainset['vocab_words'], trainset['vocab_answers'],
+                                   cuda=True, data_parallel=True)
+        vqa_model = vqa_model.module
+        if args.pretrained_vqa:
+            load_vqa_checkpoint(vqa_model, None, os.path.join(options['logs']['dir_logs'], 'best'))
 
-    # load_vqa_checkpoint(vqa_model, None, os.path.join(options['logs']['dir_logs'], 'best'))
+        if args.cx_model == "BlackBox":
+            cx_model = BlackBox(vqa_model, knn_size=24, trainable_vqa=args.trainable_vqa)
+        elif args.cx_model == "LinearContext":
+            cx_model = LinearContext(vqa_model, knn_size=24, trainable_vqa=args.trainable_vqa)
+        elif args.cx_model == "SemanticBaseline":
+            cx_model = SemanticBaseline(vqa_model, knn_size=24, trainable_vqa=args.trainable_vqa)
+        elif args.cx_model == "PairwiseModel":
+            assert(args.pairwise)
+            cx_model = PairwiseModel(vqa_model, knn_size=2, trainable_vqa=args.trainable_vqa)
+        elif args.cx_model == "PairwiseLinearModel":
+            cx_model = PairwiseLinearModel(vqa_model, knn_size=24, trainable_vqa=args.trainable_vqa)
+        else:
+            raise ValueError("Unrecognized cx_model {}".format(args.cx_model))
 
-    # cx_model = LinearContext(vqa_model, knn_size=24, trainable_vqa=False)
-    # cx_model = PairwiseModel(vqa_model, knn_size=2, trainable_vqa=False)
-    cx_model = PairwiseLinearModel(vqa_model, knn_size=24, trainable_vqa=False)
-    # cx_model = SemanticBaseline(vqa_model, knn_size=24, trainable_vqa=False)
-    # pairwise_model = PairwiseModel(vqa_model, knn_size=2, trainable_vqa=False)
-    # cx_model = FullNeuralModel(pairwise_model, knn_size=24)
+        optimizer = torch.optim.Adam(cx_model.parameters(), lr=options['optim']['lr'])
+
+    print("Built {}".format(args.cx_model))
 
     if args.resume:
         info, start_epoch, best_recall = load_cx_checkpoint(cx_model, save_dir, resume_best=args.best)
@@ -182,15 +210,14 @@ def main():
     if args.pairwise:
         print('==> Pairwise training')
 
-    optimizer = torch.optim.Adam(cx_model.parameters(), lr=options['optim']['lr'])
-
     for epoch in range(start_epoch, options['optim']['epochs'] + 1):
 
         cx_model.train()
-        if args.trainable_vqa:
-            vqa_model.train()
-        else:
-            vqa_model.eval()
+        if vqa_model is not None:
+            if args.trainable_vqa:
+                vqa_model.train()
+            else:
+                vqa_model.eval()
 
         train_b = 0
 
@@ -199,10 +226,11 @@ def main():
         trainset_batched = batchify(trainset['examples_list'], batch_size=options['optim']['batch_size'])
         for batch in tqdm(trainset_batched):
             assert(cx_model.training)
-            if args.trainable_vqa:
-                assert(vqa_model.training)
-            else:
-                assert(not vqa_model.training)
+            if vqa_model is not None:
+                if args.trainable_vqa:
+                    assert(vqa_model.training)
+                else:
+                    assert(not vqa_model.training)
 
             image_features, question_wids, answer_aids, comp_idxs = getDataFromBatch(batch, features_train, trainset['name_to_index'], pairwise=args.pairwise)
 
@@ -217,9 +245,10 @@ def main():
                 correct = recallAtK(scores, comp_idxs, k=5)
                 loss = criterion(scores, comp_idxs) / len(batch)
 
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            if optimizer is not None:
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
 
             train_b += 1
 

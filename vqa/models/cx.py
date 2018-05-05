@@ -21,7 +21,7 @@ class RandomBaseline(nn.Module):
 
 	def forward(self, image_features, question_wids, answer_aids):
 		batch_size = image_features.size(0)
-		scores = Variable(torch.rand((batch_size, self.knn_size)))
+		scores = Variable(torch.rand((batch_size, self.knn_size))).cuda()
 		return scores
 
 
@@ -35,7 +35,7 @@ class DistanceBaseline(nn.Module):
 	def forward(self, image_features, question_wids, answer_aids):
 		batch_size = image_features.size(0)
 		scores = Variable(Tensor(list(reversed(range(self.knn_size)))).view(
-			1, -1).expand((batch_size, self.knn_size)))
+			1, -1).expand((batch_size, self.knn_size))).cuda()
 		return scores
 
 
