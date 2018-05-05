@@ -28,7 +28,8 @@ import vqa.lib.logger as logger
 import vqa.lib.criterions as criterions
 import vqa.datasets as datasets
 import vqa.models as models
-from vqa.models.cx import RandomBaseline, DistanceBaseline, BlackBox, LinearContext, PairwiseModel
+from vqa.models.cx import (RandomBaseline, DistanceBaseline, BlackBox,
+    LinearContext, PairwiseModel, PairwiseLinearModel, SemanticBaseline)
 
 from train import load_checkpoint as load_vqa_checkpoint
 
@@ -155,10 +156,14 @@ def main():
                                cuda=True, data_parallel=True)
     vqa_model = vqa_model.module
 
-    load_vqa_checkpoint(vqa_model, None, os.path.join(options['logs']['dir_logs'], 'best'))
+    # load_vqa_checkpoint(vqa_model, None, os.path.join(options['logs']['dir_logs'], 'best'))
 
-    # cx_model = LinearContext(vqa_model, knn_size=24)
-    cx_model = PairwiseModel(vqa_model, knn_size=2)
+    # cx_model = LinearContext(vqa_model, knn_size=24, trainable_vqa=False)
+    # cx_model = PairwiseModel(vqa_model, knn_size=2, trainable_vqa=False)
+    cx_model = PairwiseLinearModel(vqa_model, knn_size=24, trainable_vqa=False)
+    # cx_model = SemanticBaseline(vqa_model, knn_size=24, trainable_vqa=False)
+    # pairwise_model = PairwiseModel(vqa_model, knn_size=2, trainable_vqa=False)
+    # cx_model = FullNeuralModel(pairwise_model, knn_size=24)
 
     if args.resume:
         info, start_epoch, best_recall = load_cx_checkpoint(cx_model, save_dir, resume_best=args.best)
@@ -183,9 +188,9 @@ def main():
 
         cx_model.train()
         if args.trainable_vqa:
-            vqa_model.eval()
-        else:
             vqa_model.train()
+        else:
+            vqa_model.eval()
 
         train_b = 0
 
@@ -194,17 +199,23 @@ def main():
         trainset_batched = batchify(trainset['examples_list'], batch_size=options['optim']['batch_size'])
         for batch in tqdm(trainset_batched):
             assert(cx_model.training)
+            if args.trainable_vqa:
+                assert(vqa_model.training)
+            else:
+                assert(not vqa_model.training)
 
             image_features, question_wids, answer_aids, comp_idxs = getDataFromBatch(batch, features_train, trainset['name_to_index'], pairwise=args.pairwise)
 
             scores = cx_model(image_features, question_wids, answer_aids)
 
-            loss = criterion(scores, comp_idxs) / len(batch)
-
             if args.pairwise:
-                correct = recallAtK(scores, comp_idxs, k=1)
+                assert(scores.size(1) == 2)
+                zeros = Variable(torch.LongTensor([0] * len(batch))).cuda()
+                loss = criterion(scores, zeros) / len(batch)
+                correct = recallAtK(scores, zeros, k=1)
             else:
                 correct = recallAtK(scores, comp_idxs, k=5)
+                loss = criterion(scores, comp_idxs) / len(batch)
 
             optimizer.zero_grad()
             loss.backward()
@@ -213,11 +224,21 @@ def main():
             train_b += 1
 
             if train_b % args.print_freq == 0:
-                log_results(train_writer, mode='train', epoch=epoch, i=((epoch - 1) * len(trainset_batched)) + train_b, loss=float(loss), recall=(correct.sum() / len(batch)))
+                if args.pairwise:
+                    metrics = {
+                        'loss_pairwise': float(loss),
+                        'acc_pairwise': (correct.sum() / len(batch))
+                    }
+                else:
+                    metrics = {
+                        'loss': float(loss),
+                        'recall': (correct.sum() / len(batch))
+                    }
+                log_results(train_writer, mode='train', epoch=epoch, i=((epoch - 1) * len(trainset_batched)) + train_b, metrics=metrics)
 
             if (args.eval_freq > 0 and train_b % args.eval_freq == 0) or train_b == len(trainset_batched):
                 eval_results = eval_model(cx_model, valset, features_val, options['optim']['batch_size'], pairwise=args.pairwise)
-                log_results(val_writer, mode='val', epoch=epoch, i=((epoch - 1) * len(trainset_batched)) + train_b, loss=eval_results['loss'], recall=eval_results['recall'])
+                log_results(val_writer, mode='val', epoch=epoch, i=((epoch - 1) * len(trainset_batched)) + train_b, metrics=eval_results)
 
         info.append(eval_results)
 
@@ -234,38 +255,49 @@ def eval_model(cx_model, valset, features_val, batch_size, pairwise=False):
     cx_model.eval()
 
     val_i = val_correct = val_loss = 0
+    val_pairwise_correct = val_pairwise_loss = 0
 
     criterion = nn.CrossEntropyLoss(size_average=False)
 
     valset_batched = batchify(valset['examples_list'], batch_size=batch_size)
     for batch in tqdm(valset_batched):
-        image_features, question_wids, answer_aids, comp_idxs = getDataFromBatch(batch, features_val, valset['name_to_index'], pairwise)
-        scores = cx_model(image_features, question_wids, answer_aids)
 
+        cx_model.knn_size = 24
+        image_features, question_wids, answer_aids, comp_idxs = getDataFromBatch(batch, features_val, valset['name_to_index'], pairwise=False)
+        scores = cx_model(image_features, question_wids, answer_aids)
         val_loss += float(criterion(scores, comp_idxs))
+        correct = recallAtK(scores, comp_idxs, k=5)
+        val_correct += correct.sum()
+        val_i += len(batch)
 
         if pairwise:
-            correct = recallAtK(scores, comp_idxs, k=1)
-        else:
-            correct = recallAtK(scores, comp_idxs, k=5)
-        val_correct += correct.sum()
-
-        val_i += len(batch)
+            cx_model.knn_size = 2
+            image_features, question_wids, answer_aids, comp_idxs = getDataFromBatch(batch, features_val, valset['name_to_index'], pairwise=True)
+            scores = cx_model(image_features, question_wids, answer_aids)
+            zeros = Variable(torch.LongTensor([0] * len(batch))).cuda()
+            val_pairwise_loss += float(criterion(scores, zeros))
+            val_pairwise_correct += recallAtK(scores, zeros, k=1).sum()
 
     results = {
         'loss': (val_loss / val_i),
-        'recall': (val_correct / val_i)
+        'recall': (val_correct / val_i),
     }
+
+    if pairwise:
+        results['loss_pairwise'] = (val_pairwise_loss / val_i)
+        results['acc_pairwise'] = (val_pairwise_correct / val_i)
 
     cx_model.train()
 
     return results
 
 
-def log_results(writer, mode, epoch, i, loss, recall):
-    print("Epoch {} {}: Loss: {:.2f}, Recall: {:.4f}".format(epoch, mode, loss, recall))
-    writer.add_scalar('loss', loss, i)
-    writer.add_scalar('recall', recall, i)
+def log_results(writer, mode, epoch, i, metrics):
+    metrics_str = ''
+    for k, v in metrics.items():
+        writer.add_scalar(k, v, i)
+        metrics_str += '{}: {:.4f}, '.format(k, v)
+    print('Epoch {} {}: {}'.format(epoch, mode, metrics_str))
 
 
 def recallAtK(scores, ground_truth, k=5):
@@ -304,9 +336,6 @@ def getDataFromBatch(batch, features, name_to_index, pairwise=False):
         question_wids.append(ex['question_wids'])
         answer_aids.append(ex['answer_aid'])
         comp_idxs.append(ex['comp']['knn_index'])
-
-    if pairwise:
-        comp_idxs = [0 for _ in range(len(batch))]
 
     # TODO: Make call to .cuda() conditional on model type
     image_features = torch.from_numpy(np.array([features[idxs] for idxs in image_idxs])).cuda()
