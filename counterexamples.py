@@ -155,10 +155,10 @@ def main():
                                cuda=True, data_parallel=True)
     vqa_model = vqa_model.module
 
-    # load_vqa_checkpoint(vqa_model, None, os.path.join(options['logs']['dir_logs'], 'best'))
+    load_vqa_checkpoint(vqa_model, None, os.path.join(options['logs']['dir_logs'], 'best'))
 
-    cx_model = LinearContext(vqa_model, knn_size=24)
-    # cx_model = PairwiseModel(vqa_model, knn_size=24)
+    # cx_model = LinearContext(vqa_model, knn_size=24)
+    cx_model = PairwiseModel(vqa_model, knn_size=2)
 
     if args.resume:
         info, start_epoch, best_recall = load_cx_checkpoint(cx_model, save_dir, resume_best=args.best)

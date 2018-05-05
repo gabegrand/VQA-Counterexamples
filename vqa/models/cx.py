@@ -155,7 +155,7 @@ class PairwiseModel(CXModelBase):
 
         self.dim_h = 300
 
-        self.linear = nn.Linear((2 * self.dim_v) + self.dim_q, self.dim_h)
+        self.linear = nn.Linear((2 * self.dim_v) + self.dim_q + self.dim_z, self.dim_h)
         self.out = nn.Linear(self.dim_h, 1)
         self.relu = nn.ReLU()
 
@@ -164,10 +164,15 @@ class PairwiseModel(CXModelBase):
         v_comp = image_features[:, 1]
         v_other = image_features[:, 2]
 
+        # TODO: this is redundant, can get from VQA forward
         q_emb = self.vqa_model.seq2vec(Variable(question_wids)).detach().data
 
-        input_comp = Variable(torch.cat((v_orig, v_comp, q_emb), dim=1), requires_grad=True)
-        input_other = Variable(torch.cat((v_orig, v_other, q_emb), dim=1), requires_grad=True)
+        _, z_orig, _, z_knns = self.vqa_forward(image_features, question_wids)
+        z_comp = z_knns[:, 0].detach().data
+        z_other = z_knns[:, 1].detach().data
+
+        input_comp = Variable(torch.cat((v_orig, v_comp, q_emb, z_comp), dim=1), requires_grad=True)
+        input_other = Variable(torch.cat((v_orig, v_other, q_emb, z_other), dim=1), requires_grad=True)
 
         h_comp = self.relu(self.linear(input_comp))
         h_other = self.relu(self.linear(input_other))
