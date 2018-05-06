@@ -29,7 +29,8 @@ import vqa.lib.criterions as criterions
 import vqa.datasets as datasets
 import vqa.models as models
 from vqa.models.cx import (RandomBaseline, DistanceBaseline, BlackBox,
-    LinearContext, PairwiseModel, PairwiseLinearModel, SemanticBaseline)
+    LinearContext, PairwiseModel, PairwiseLinearModel, SemanticBaseline,
+    SimilarityModel)
 
 from train import load_checkpoint as load_vqa_checkpoint
 
@@ -186,6 +187,10 @@ def main():
             cx_model = PairwiseModel(vqa_model, knn_size=2, trainable_vqa=args.trainable_vqa)
         elif args.cx_model == "PairwiseLinearModel":
             cx_model = PairwiseLinearModel(vqa_model, knn_size=24, trainable_vqa=args.trainable_vqa)
+        elif args.cx_model == "DatasetStatistics":
+            cx_model = DatasetStatistics(vqa_model, knn_size=24, trainable_vqa=False)
+        elif args.cx_model == "SimilarityModel":
+            cx_model = SimilarityModel(vqa_model, knn_size=24, trainable_vqa=False)
         else:
             raise ValueError("Unrecognized cx_model {}".format(args.cx_model))
 
@@ -278,6 +283,9 @@ def main():
             is_best = False
 
         save_cx_checkpoint(cx_model, info, save_dir, is_best=is_best)
+
+    # eval_results = eval_model(cx_model, valset, features_val, options['optim']['batch_size'], pairwise=args.pairwise)
+    # log_results(val_writer, mode='test', epoch=0, i=0, metrics=eval_results)
 
 
 def eval_model(cx_model, valset, features_val, batch_size, pairwise=False):

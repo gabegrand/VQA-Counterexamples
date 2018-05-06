@@ -228,7 +228,7 @@ class PairwiseLinearModel(CXModelBase):
 		self.dim_h = 300
 
 		self.linear = nn.Linear(
-			(2 * self.dim_v) + self.dim_q + self.dim_z, self.dim_h)
+			(2 * self.dim_v) + self.dim_q + (2 * self.dim_z), self.dim_h)
 		self.out = nn.Linear(self.dim_h, 1)
 		self.final = nn.Linear(self.knn_size, self.knn_size)
 		self.relu = nn.ReLU()
@@ -237,22 +237,20 @@ class PairwiseLinearModel(CXModelBase):
 		n_preds = image_features.size(1) - 1
 		assert(n_preds == self.knn_size)
 
-		v_orig = image_features[:, 0]
+		v_orig = Variable(image_features[:, 0])
 
 		# TODO: this is redundant, can get from VQA forward
-		q_emb = self.vqa_model.seq2vec(Variable(question_wids)).detach().data
+		q_emb = Variable(self.vqa_model.seq2vec(Variable(question_wids)).detach().data)
 
 		_, z_orig, _, z_knns = self.vqa_forward(image_features, question_wids)
-		z_knns = z_knns.detach().data
 
 		scores = []
 
 		for i in range(n_preds):
-			v_other = image_features[:, i + 1]
+			v_other = Variable(image_features[:, i + 1])
 			z_other = z_knns[:, i]
 
-			input = Variable(
-				torch.cat((v_orig, v_other, q_emb, z_other), dim=1), requires_grad=True)
+			input = torch.cat((v_orig, v_other, q_emb, z_orig, z_other), dim=1)
 			h = self.relu(self.linear(input))
 			score = self.relu(self.out(h))
 
@@ -263,3 +261,34 @@ class PairwiseLinearModel(CXModelBase):
 		scores = self.final(scores)
 
 		return scores
+
+
+class SimilarityModel(CXModelBase):
+
+	def __init__(self, *args, **kwargs):
+		super().__init__(*args, **kwargs)
+		self.dim_z = self.vqa_model.opt['fusion']['dim_mm']
+
+	def forward(self, image_features, question_wids, answer_aids):
+		batch_size = image_features.size(0)
+
+		a_orig, z_orig, a_knns, z_knns = self.vqa_forward(
+			image_features, question_wids)
+
+		v_orig = image_features[:, 0]
+		v_cossim = torch.zeros([batch_size, self.knn_size])
+
+		z_orig = z_orig.data
+		z_knns = z_knns.data
+		z_cossim = torch.zeros([batch_size, self.knn_size])
+
+		a_xent = torch.zeros([batch_size, self.knn_size])
+
+		for i in range(self.knn_size):
+			v_cossim[:, i] = F.cosine_similarity(v_orig, image_features[:, i+1])
+			z_cossim[:, i] = F.cosine_similarity(z_orig, z_knns[:, i])
+			a_xent[:, i] = F.cross_entropy(a_knns[:, i], Variable(answer_aids), reduce=False).data
+
+		scores = v_cossim + z_cossim + a_xent
+
+		return Variable(scores).cuda()
