@@ -1,5 +1,5 @@
 logs:
-    dir_logs: logs/vqa2/mutan_noatt_train
+    dir_logs: /datadrive/vqa.pytorch/logs/vqa2/mutan_noatt_train
 vqa:
     dataset: VQA2
     dir: /datadrive/vqa.pytorch/data/vqa2

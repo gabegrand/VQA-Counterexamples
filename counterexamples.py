@@ -68,7 +68,7 @@ parser.add_argument('--pairwise', action='store_true', help='Pairwise training')
 group = parser.add_mutually_exclusive_group(required=False)
 group.add_argument('--pretrained_vqa', dest='pretrained_vqa', action='store_true')
 group.add_argument('--untrained_vqa', dest='pretrained_vqa', action='store_false')
-parser.set_defaults(pretrained=True)
+parser.set_defaults(pretrained_vqa=True)
 
 parser.add_argument('--trainable_vqa', action='store_true', help='If true, backprop through VQA model')
 
@@ -182,7 +182,7 @@ def main():
         elif args.cx_model == "LinearContext":
             cx_model = LinearContext(vqa_model, knn_size=24, trainable_vqa=args.trainable_vqa)
         elif args.cx_model == "SemanticBaseline":
-            if not args.sb_lambda:
+            if args.sb_lambda is None:
                 raise ValueError("If semantic baseline is selected then --sb_lambda must also be provided.")
             cx_model = SemanticBaseline(vqa_model, knn_size=24, trainable_vqa=args.trainable_vqa)
             cx_model.set_lambda(args.sb_lambda)
@@ -285,6 +285,9 @@ def main():
             is_best = False
 
         save_cx_checkpoint(cx_model, info, save_dir, is_best=is_best)
+
+    eval_results = eval_model(cx_model, valset, features_val, options['optim']['batch_size'], pairwise=args.pairwise)
+    log_results(val_writer, mode='val', epoch=0, i=0, metrics=eval_results)
 
 
 def eval_model(cx_model, valset, features_val, batch_size, pairwise=False):
