@@ -28,9 +28,7 @@ import vqa.lib.logger as logger
 import vqa.lib.criterions as criterions
 import vqa.datasets as datasets
 import vqa.models as models
-from vqa.models.cx import (RandomBaseline, DistanceBaseline, BlackBox,
-    LinearContext, PairwiseModel, PairwiseLinearModel, SemanticBaseline,
-    SimilarityModel)
+from vqa.models.cx import ContrastiveModel
 
 from train import load_checkpoint as load_vqa_checkpoint
 
@@ -39,9 +37,6 @@ parser = argparse.ArgumentParser()
 
 parser.add_argument('--path_opt', default='options/vqa2/counterexamples_default.yaml',
                     type=str, help='path to a yaml options file')
-
-parser.add_argument('-cx', '--cx_model', required=True,
-                    type=str, help='Counterexample model type')
 
 
 parser.add_argument('-lr', '--learning_rate', type=float,
@@ -57,12 +52,12 @@ parser.add_argument('--best', action='store_true',
                     help='whether to resume best checkpoint')
 
 parser.add_argument('-c', '--comment', type=str, default='')
-parser.add_argument('-p', '--print_freq', default=10, type=int,
+parser.add_argument('-p', '--print_freq', default=100, type=int,
                     help='print frequency')
 parser.add_argument('-v', '--eval_freq', default=-1, type=int,
                     help='eval frequency')
 
-parser.add_argument('--pairwise', action='store_true', help='Pairwise training')
+parser.add_argument('--pairwise', action='store_true', default=True, help='Pairwise training')
 
 group = parser.add_mutually_exclusive_group(required=False)
 group.add_argument('--pretrained_vqa', dest='pretrained_vqa', action='store_true')
@@ -162,39 +157,18 @@ def main():
     #########################################################################################
     print('=> Building model...')
 
-    vqa_model = None
-    optimizer = None
-    if args.cx_model == "RandomBaseline":
-        cx_model = RandomBaseline(knn_size=24)
-    elif args.cx_model == "DistanceBaseline":
-        cx_model = DistanceBaseline(knn_size=24)
-    else:
-        vqa_model = models.factory(options['model'],
-                                   trainset['vocab_words'], trainset['vocab_answers'],
-                                   cuda=True, data_parallel=True)
-        vqa_model = vqa_model.module
-        if args.pretrained_vqa:
-            load_vqa_checkpoint(vqa_model, None, os.path.join(options['logs']['dir_logs'], 'best'))
+    vqa_model = models.factory(options['model'],
+                               trainset['vocab_words'], trainset['vocab_answers'],
+                               cuda=True, data_parallel=True)
+    vqa_model = vqa_model.module
 
-        if args.cx_model == "BlackBox":
-            cx_model = BlackBox(vqa_model, knn_size=24, trainable_vqa=args.trainable_vqa)
-        elif args.cx_model == "LinearContext":
-            cx_model = LinearContext(vqa_model, knn_size=24, trainable_vqa=args.trainable_vqa)
-        elif args.cx_model == "SemanticBaseline":
-            cx_model = SemanticBaseline(vqa_model, knn_size=24, trainable_vqa=args.trainable_vqa)
-        elif args.cx_model == "PairwiseModel":
-            assert(args.pairwise)
-            cx_model = PairwiseModel(vqa_model, knn_size=2, trainable_vqa=args.trainable_vqa)
-        elif args.cx_model == "PairwiseLinearModel":
-            cx_model = PairwiseLinearModel(vqa_model, knn_size=24, trainable_vqa=args.trainable_vqa)
-        elif args.cx_model == "SimilarityModel":
-            cx_model = SimilarityModel(vqa_model, knn_size=24, trainable_vqa=False)
-        else:
-            raise ValueError("Unrecognized cx_model {}".format(args.cx_model))
+    if args.pretrained_vqa:
+        load_vqa_checkpoint(vqa_model, None, os.path.join(options['logs']['dir_logs'], 'best'))
 
-        optimizer = torch.optim.Adam(cx_model.parameters(), lr=options['optim']['lr'])
+    cx_model = ContrastiveModel(vqa_model, knn_size=2, trainable_vqa=args.trainable_vqa)
 
-    print("Built {}".format(args.cx_model))
+    optimizer = torch.optim.Adam(cx_model.parameters(), lr=options['optim']['lr'])
+
 
     if args.resume:
         info, start_epoch, best_recall = load_cx_checkpoint(cx_model, save_dir, resume_best=args.best)
@@ -224,7 +198,8 @@ def main():
 
         train_b = 0
 
-        criterion = nn.CrossEntropyLoss(size_average=False)
+        criterion = ContrastiveLoss()
+        criterion.cuda()
 
         trainset_batched = batchify(trainset['examples_list'], batch_size=options['optim']['batch_size'])
         for batch in tqdm(trainset_batched):
@@ -237,16 +212,11 @@ def main():
 
             image_features, question_wids, answer_aids, comp_idxs = getDataFromBatch(batch, features_train, trainset['name_to_index'], pairwise=args.pairwise)
 
-            scores = cx_model(image_features, question_wids, answer_aids)
+            h_out = cx_model(image_features, question_wids, answer_aids)
 
-            if args.pairwise:
-                assert(scores.size(1) == 2)
-                zeros = Variable(torch.LongTensor([0] * len(batch))).cuda()
-                loss = criterion(scores, zeros) / len(batch)
-                correct = recallAtK(scores, zeros, k=1)
-            else:
-                correct = recallAtK(scores, comp_idxs, k=5)
-                loss = criterion(scores, comp_idxs) / len(batch)
+            loss_comp = criterion(h_out[:, 0], h_out[:, 1], label=Variable(torch.ones([len(batch)])).cuda())
+            loss_other = criterion(h_out[:, 0], h_out[:, 2], label=Variable(torch.zeros([len(batch)])).cuda())
+            loss = loss_comp + loss_other
 
             if optimizer is not None:
                 optimizer.zero_grad()
@@ -256,15 +226,15 @@ def main():
             train_b += 1
 
             if train_b % args.print_freq == 0:
-                if args.pairwise:
-                    metrics = {
-                        'loss_pairwise': float(loss),
-                        'acc_pairwise': (correct.sum() / len(batch))
-                    }
-                else:
-                    metrics = {
-                        'loss': float(loss),
-                        'recall': (correct.sum() / len(batch))
+                dists = cx_model.get_scores(h_out[:, 0], h_out[:, 1:])
+                dist_comp = dists[:, 0].mean()
+                dist_other = dists[:, 1].mean()
+                metrics = {
+                    'contrastive/loss_comp': float(loss_comp),
+                    'contrastive/loss_other': float(loss_other),
+                    'contrastive/loss': float(loss),
+                    'contrastive/dist_comp': float(dist_comp),
+                    'contrastive/dist_other': float(dist_other)
                     }
                 log_results(train_writer, mode='train', epoch=epoch, i=((epoch - 1) * len(trainset_batched)) + train_b, metrics=metrics)
 
@@ -274,16 +244,16 @@ def main():
 
         info.append(eval_results)
 
-        if info[-1]['recall'] > best_recall:
+        if eval_results['contrastive/recall'] > best_recall:
             is_best = True
-            best_recall = info[-1]['recall']
+            best_recall = eval_results['contrastive/recall']
         else:
             is_best = False
 
         save_cx_checkpoint(cx_model, info, save_dir, is_best=is_best)
 
-    # eval_results = eval_model(cx_model, valset, features_val, options['optim']['batch_size'], pairwise=args.pairwise)
-    # log_results(val_writer, mode='test', epoch=0, i=0, metrics=eval_results)
+    eval_results = eval_model(cx_model, valset, features_val, options['optim']['batch_size'], pairwise=args.pairwise)
+    log_results(val_writer, mode='test', epoch=0, i=0, metrics=eval_results)
 
 
 def eval_model(cx_model, valset, features_val, batch_size, pairwise=False):
@@ -299,32 +269,44 @@ def eval_model(cx_model, valset, features_val, batch_size, pairwise=False):
 
         cx_model.knn_size = 24
         image_features, question_wids, answer_aids, comp_idxs = getDataFromBatch(batch, features_val, valset['name_to_index'], pairwise=False)
-        scores = cx_model(image_features, question_wids, answer_aids)
-        val_loss += float(criterion(scores, comp_idxs))
+        h_out = cx_model(image_features, question_wids, answer_aids)
+
+        h_orig = h_out[:, 0]
+        h_knns = h_out[:, 1:]
+
+        scores = cx_model.get_scores(h_orig, h_knns)
+
         correct = recallAtK(scores, comp_idxs, k=5)
         val_correct += correct.sum()
         val_i += len(batch)
 
-        if pairwise:
-            cx_model.knn_size = 2
-            image_features, question_wids, answer_aids, comp_idxs = getDataFromBatch(batch, features_val, valset['name_to_index'], pairwise=True)
-            scores = cx_model(image_features, question_wids, answer_aids)
-            zeros = Variable(torch.LongTensor([0] * len(batch))).cuda()
-            val_pairwise_loss += float(criterion(scores, zeros))
-            val_pairwise_correct += recallAtK(scores, zeros, k=1).sum()
-
     results = {
-        'loss': (val_loss / val_i),
-        'recall': (val_correct / val_i),
+        'contrastive/recall': (val_correct / val_i),
     }
 
-    if pairwise:
-        results['loss_pairwise'] = (val_pairwise_loss / val_i)
-        results['acc_pairwise'] = (val_pairwise_correct / val_i)
-
+    cx_model.knn_size = 2
     cx_model.train()
 
     return results
+
+
+class ContrastiveLoss(nn.Module):
+    """
+    Contrastive loss function
+    Source: https://gist.github.com/harveyslash/725fcc68df112980328951b3426c0e0b
+    Based on: http://yann.lecun.com/exdb/publis/pdf/hadsell-chopra-lecun-06.pdf
+    """
+
+    def __init__(self, margin=2.0):
+        super(ContrastiveLoss, self).__init__()
+        self.margin = margin
+
+    def forward(self, output1, output2, label):
+        euclidean_distance = F.pairwise_distance(output1, output2)
+        same_class = (1-label) * torch.pow(euclidean_distance, 2)
+        diff_class = (label) * torch.pow(torch.clamp(self.margin - euclidean_distance, min=0.0), 2)
+        loss_contrastive = torch.mean(same_class + diff_class)
+        return loss_contrastive
 
 
 def log_results(writer, mode, epoch, i, metrics):
