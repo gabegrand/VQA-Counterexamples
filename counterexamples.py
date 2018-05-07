@@ -45,6 +45,8 @@ parser.add_argument('-cx', '--cx_model', required=True,
 
 parser.add_argument('-lr', '--learning_rate', type=float,
                     help='initial learning rate')
+parser.add_argument('-lb', '--sb_lambda', type=float,
+                    help='semantic baseline lambda')
 parser.add_argument('-b', '--batch_size', type=int,
                     help='mini-batch size')
 parser.add_argument('--epochs', type=int,
@@ -180,7 +182,12 @@ def main():
         elif args.cx_model == "LinearContext":
             cx_model = LinearContext(vqa_model, knn_size=24, trainable_vqa=args.trainable_vqa)
         elif args.cx_model == "SemanticBaseline":
+            if not args.sb_lambda:
+                raise ValueError("If semantic baseline is selected then --sb_lambda must also be provided.")
             cx_model = SemanticBaseline(vqa_model, knn_size=24, trainable_vqa=args.trainable_vqa)
+            cx_model.set_lambda(args.sb_lambda)
+            emb = pickle.load(open(os.path.join(options['vqa']['path_trainset'], "answer_embedding.pickle"), 'rb'))
+            cx_model.set_answer_embedding(emb)
         elif args.cx_model == "PairwiseModel":
             assert(args.pairwise)
             cx_model = PairwiseModel(vqa_model, knn_size=2, trainable_vqa=args.trainable_vqa)
