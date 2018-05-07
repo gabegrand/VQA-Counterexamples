@@ -1,3 +1,6 @@
+import pickle
+import os
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -6,6 +9,8 @@ from torch.autograd import Variable
 
 from vqa.models import fusion
 from .noatt import AbstractNoAtt
+
+from sklearn.metrics.pairwise import cosine_similarity
 
 
 ##########################################################################
@@ -117,8 +122,11 @@ class BlackBox(CXModelBase):
 
 		# VQA model's score for the original answer for each KNN
 		scores_list = []
+
 		for i, a_idx in enumerate(answer_aids):
-			scores_list.append(a_knns[i, :, a_idx])
+			a_distribution = F.softmax(a_knns[i, :], dim=-1)
+			scores_list.append(a_distribution[:, a_idx])
+
 		scores = torch.stack(scores_list, dim=0)
 
 		# Flip the sign, since the highest scoring items are the worst
@@ -153,21 +161,58 @@ class SemanticBaseline(CXModelBase):
 	def __init__(self, *args, **kwargs):
 		super().__init__(*args, **kwargs)
 		self.dim_z = self.vqa_model.opt['fusion']['dim_mm']
-		# self.lambda = 0.5
+		print(self.vqa_model.opt)
+		self.emb = np.zeros((2000, 2400))
+		self.emb_pairs = np.zeros((2000,2000))
 
+		self.lam = 0.5 # default
+
+	def set_lambda(self, lam):
+		self.lam = lam
+
+	def set_answer_embedding(self, emb):
+		self.emb = emb
+		self.emb_pairs = cosine_similarity(self.emb)
+
+	def softmax(self, w):
+		e = np.exp(np.array(w))
+		dist = e / np.sum(e)
+		return dist
 
 	def forward(self, image_features, question_wids, answer_aids):
 		a_orig, z_orig, a_knns, z_knns, _ = self.vqa_forward(
 			image_features, question_wids)
+		a_orig = a_orig.cpu().data.numpy()
+		a_knns = a_knns.cpu().data.numpy()
+		answer_aids = answer_aids.cpu().numpy()
 
-		assert(z_knns.requires_grad)
+		ret_scores = []
+		for ex, knn, aid in zip(a_orig, a_knns, answer_aids):
+			scores = []
+			for nn_i, nb in enumerate(knn):
+				nb = self.softmax(nb)
+				weighted_sim = self.emb_pairs[aid,:].dot(nb)
 
-		print('sizes', a_orig.size(), a_knns.size())
+				# THIS IS IMPORTANT
+				weighted_sim -= nb[aid] #* self.emb_pairs[aid,aid]
+
+				logp = nb[aid]
+				p = nb[aid] + 1e-8
+				logp = np.log(p)
+				# score = -1 * (self.lam * weighted_sim + (1-self.lam) * logp)
+				# THIS IS ALSO IMPORTANT
+				score = (self.lam * weighted_sim) - ((1-self.lam) * logp)
+				scores.append(score)
+			softmax_scores = self.softmax(scores)
+			ret_scores.append(softmax_scores)
+		ret_scores = np.array(ret_scores)
+		ret_scores = Variable(torch.cuda.FloatTensor(ret_scores), requires_grad=True)
+		return ret_scores
+
+		# sizes torch.Size([64, 2000]) torch.Size([64, 24, 2000])
+
 		# scores = self.linear(z_knns.view(-1, self.knn_size * self.dim_z))
 		# TODO: dropout
-
-		return scores
-
 
 class PairwiseModel(CXModelBase):
 
