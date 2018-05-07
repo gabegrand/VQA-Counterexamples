@@ -135,7 +135,6 @@ class BlackBox(CXModelBase):
 		return scores
 
 
-
 class LinearContext(CXModelBase):
 
 	def __init__(self, *args, **kwargs):
@@ -194,7 +193,7 @@ class SemanticBaseline(CXModelBase):
 				weighted_sim = self.emb_pairs[aid,:].dot(nb)
 
 				# THIS IS IMPORTANT
-				weighted_sim -= nb[aid] * self.emb_pairs[aid,aid]
+				weighted_sim -= nb[aid] #* self.emb_pairs[aid,aid]
 
 				logp = nb[aid]
 				p = nb[aid] + 1e-8

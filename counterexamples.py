@@ -247,9 +247,10 @@ def main():
                 assert(scores.size(1) == 2)
                 zeros = Variable(torch.LongTensor([0] * len(batch))).cuda()
                 loss = criterion(scores, zeros) / len(batch)
-                correct = recallAtK(scores, zeros, k=1)
+                correct1 = recallAtK(scores, zeros, k=1)
             else:
-                correct = recallAtK(scores, comp_idxs, k=5)
+                correct1 = recallAtK(scores, comp_idxs, k=1)
+                correct5 = recallAtK(scores, comp_idxs, k=5)
                 loss = criterion(scores, comp_idxs) / len(batch)
 
             if optimizer is not None:
@@ -263,12 +264,13 @@ def main():
                 if args.pairwise:
                     metrics = {
                         'loss_pairwise': float(loss),
-                        'acc_pairwise': (correct.sum() / len(batch))
+                        'acc_pairwise': (correct1.sum() / len(batch))
                     }
                 else:
                     metrics = {
                         'loss': float(loss),
-                        'recall': (correct.sum() / len(batch))
+                        'recall_1': (correct1.sum() / len(batch)),
+                        'recall_5': (correct5.sum() / len(batch))
                     }
                 log_results(train_writer, mode='train', epoch=epoch, i=((epoch - 1) * len(trainset_batched)) + train_b, metrics=metrics)
 
@@ -278,9 +280,9 @@ def main():
 
         info.append(eval_results)
 
-        if info[-1]['recall'] > best_recall:
+        if info[-1]['recall_5'] > best_recall:
             is_best = True
-            best_recall = info[-1]['recall']
+            best_recall = info[-1]['recall_5']
         else:
             is_best = False
 
@@ -293,7 +295,7 @@ def main():
 def eval_model(cx_model, valset, features_val, batch_size, pairwise=False):
     cx_model.eval()
 
-    val_i = val_correct = val_loss = 0
+    val_i = val_correct1 = val_correct5 = val_loss = 0
     val_pairwise_correct = val_pairwise_loss = 0
 
     criterion = nn.CrossEntropyLoss(size_average=False)
@@ -305,8 +307,8 @@ def eval_model(cx_model, valset, features_val, batch_size, pairwise=False):
         image_features, question_wids, answer_aids, comp_idxs = getDataFromBatch(batch, features_val, valset['name_to_index'], pairwise=False)
         scores = cx_model(image_features, question_wids, answer_aids)
         val_loss += float(criterion(scores, comp_idxs))
-        correct = recallAtK(scores, comp_idxs, k=5)
-        val_correct += correct.sum()
+        val_correct1 += recallAtK(scores, comp_idxs, k=1).sum()
+        val_correct5 += recallAtK(scores, comp_idxs, k=5).sum()
         val_i += len(batch)
 
         if pairwise:
@@ -319,7 +321,8 @@ def eval_model(cx_model, valset, features_val, batch_size, pairwise=False):
 
     results = {
         'loss': (val_loss / val_i),
-        'recall': (val_correct / val_i),
+        'recall_1': (val_correct1/ val_i),
+        'recall_5': (val_correct5 / val_i),
     }
 
     if pairwise:
@@ -415,7 +418,7 @@ def load_cx_checkpoint(cx_model, save_dir, resume_best=True):
     last_epoch = len(info)
     print('Epoch {}: {}'.format(last_epoch, info[-1]))
 
-    return info, last_epoch + 1, info[-1]['recall']
+    return info, last_epoch + 1, info[-1]['recall_5']
 
 
 def check_grad(cx_model):
