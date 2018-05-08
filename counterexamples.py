@@ -30,7 +30,7 @@ import vqa.datasets as datasets
 import vqa.models as models
 from vqa.models.cx import (RandomBaseline, DistanceBaseline, BlackBox,
     LinearContext, PairwiseModel, PairwiseLinearModel, SemanticBaseline,
-    SimilarityModel)
+    SimilarityModel, NeuralModel)
 
 from train import load_checkpoint as load_vqa_checkpoint
 
@@ -43,6 +43,8 @@ parser.add_argument('--path_opt', default='options/vqa2/counterexamples_default.
 parser.add_argument('-cx', '--cx_model', required=True,
                     type=str, help='Counterexample model type')
 
+parser.add_argument('-spec', '--model_spec', type=str, help='Path to spec for NeuralModel',
+                    default='model_specs/default.json')
 
 parser.add_argument('-lr', '--learning_rate', type=float,
                     help='initial learning rate')
@@ -59,16 +61,17 @@ parser.add_argument('--best', action='store_true',
                     help='whether to resume best checkpoint')
 
 parser.add_argument('-c', '--comment', type=str, default='')
-parser.add_argument('-p', '--print_freq', default=10, type=int,
+parser.add_argument('-p', '--print_freq', default=100, type=int,
                     help='print frequency')
 parser.add_argument('-v', '--eval_freq', default=-1, type=int,
                     help='eval frequency')
 
 parser.add_argument('--pairwise', action='store_true', help='Pairwise training')
 
-group = parser.add_mutually_exclusive_group(required=False)
-group.add_argument('--pretrained_vqa', dest='pretrained_vqa', action='store_true')
-group.add_argument('--untrained_vqa', dest='pretrained_vqa', action='store_false')
+group1 = parser.add_mutually_exclusive_group(required=False)
+group1.add_argument('--pretrained_vqa', dest='pretrained_vqa', action='store_true')
+group1.add_argument('--untrained_vqa', dest='pretrained_vqa', action='store_false')
+
 parser.set_defaults(pretrained_vqa=True)
 
 parser.add_argument('--trainable_vqa', action='store_true', help='If true, backprop through VQA model')
@@ -81,9 +84,10 @@ def main():
     args = parser.parse_args()
 
     #########################################################################################
-    # Create options
+    # Setup
     #########################################################################################
 
+    # Parse options
     options = {
         'optim': {
             'lr': args.learning_rate,
@@ -97,13 +101,24 @@ def main():
     options = utils.update_values(options, options_yaml)
     options['vgenome'] = None
 
+    # Ensure determinism
+    random.seed(42)
+    torch.manual_seed(42)
+    torch.cuda.manual_seed_all(42)
+
     #########################################################################################
     # Bookkeeping
     #########################################################################################
 
+    if args.cx_model == 'NeuralModel':
+        assert(os.path.exists(args.model_spec))
+        if not args.comment:
+            model_spec = json.load(open(args.model_spec, 'r'))
+            args.comment = model_spec['name']
+
     if args.resume:
         run_name = args.resume
-        save_dir = os.path.join('logs', 'cx', run_name)
+        save_dir = os.path.join('/datadrive/vqa.pytorch/logs/cx', run_name)
         assert(os.path.isdir(save_dir))
 
         i = 1
@@ -115,7 +130,7 @@ def main():
         run_name = datetime.now().strftime('%b%d-%H-%M-%S')
         if args.comment:
             run_name += '_' + args.comment
-        save_dir = os.path.join('logs', 'cx', run_name)
+        save_dir = os.path.join('/datadrive/vqa.pytorch/logs/cx', run_name)
         if os.path.isdir(save_dir):
             if click.confirm('Save directory already exists in {}. Erase?'.format(save_dir)):
                 os.system('rm -r ' + save_dir)
@@ -189,6 +204,25 @@ def main():
             cx_model.set_lambda(args.sb_lambda)
             emb = pickle.load(open(os.path.join(options['vqa']['path_trainset'], "answer_embedding.pickle"), 'rb'))
             cx_model.set_answer_embedding(emb)
+        elif args.cx_model == "NeuralModel":
+
+            model_spec = json.load(open(args.model_spec, 'r'))
+            print(model_spec)
+
+            if model_spec['pretrained_emb']:
+                emb = pickle.load(open(os.path.join(options['vqa']['path_trainset'], "answer_embedding.pickle"), 'rb'))
+            else:
+                emb = None
+
+            cx_model = NeuralModel(model_spec=model_spec,
+                                   dim_h=model_spec['dim_h'],
+                                   n_layers=model_spec['n_layers'],
+                                   emb=emb,
+                                   drop_p=model_spec['drop_p'],
+                                   vqa_model=vqa_model,
+                                   knn_size=24,
+                                   trainable_vqa=args.trainable_vqa)
+
         elif args.cx_model == "PairwiseModel":
             assert(args.pairwise)
             cx_model = PairwiseModel(vqa_model, knn_size=2, trainable_vqa=args.trainable_vqa)
@@ -292,8 +326,7 @@ def main():
         save_cx_checkpoint(cx_model, info, save_dir, is_best=is_best)
 
     eval_results = eval_model(cx_model, valset, features_val, options['optim']['batch_size'], pairwise=args.pairwise)
-    log_results(val_writer, mode='val', epoch=0, i=0, metrics=eval_results)
-
+    print('FINAL EPOCH RESULTS', eval_results)
 
 def eval_model(cx_model, valset, features_val, batch_size, pairwise=False):
     cx_model.eval()

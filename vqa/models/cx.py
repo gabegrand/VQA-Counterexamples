@@ -214,6 +214,121 @@ class SemanticBaseline(CXModelBase):
 		# scores = self.linear(z_knns.view(-1, self.knn_size * self.dim_z))
 		# TODO: dropout
 
+
+class NeuralModel(CXModelBase):
+
+	def __init__(self, model_spec, dim_h, n_layers, emb, drop_p, **kwargs):
+
+		super().__init__(vqa_model=kwargs['vqa_model'],
+						 knn_size=kwargs['knn_size'],
+						 trainable_vqa=kwargs['trainable_vqa'])
+
+		assert(self.knn_size == 24)
+
+		self.model_spec = model_spec
+
+		self.dim_v = self.vqa_model.opt['fusion']['dim_v']
+		self.dim_q = self.vqa_model.opt['fusion']['dim_q']
+		self.dim_z = self.vqa_model.opt['fusion']['dim_mm']
+
+		self.ans_size = len(self.vqa_model.vocab_answers)
+		self.dim_a = 2400
+
+		self.dim_h = dim_h
+		self.n_layers = n_layers
+
+		self.answer_embedding = nn.Embedding(self.ans_size, self.dim_a)
+		if emb is not None:
+			assert(emb.shape[1] == self.dim_a)
+			self.answer_embedding.weight.data = torch.FloatTensor(emb).cuda()
+
+		input_size = (self.dim_v * 3 +
+					  self.dim_a * 2 +
+					  self.dim_z * 2 +
+					  self.dim_q +
+					  self.knn_size +
+					  1
+					  )
+		self.linear_1 = nn.Linear(input_size, self.dim_h)
+		if self.n_layers == 2:
+			self.linear_2 = nn.Linear(self.dim_h, self.dim_h)
+		self.out = nn.Linear(self.dim_h, 1)
+		self.relu = nn.ReLU()
+		self.drop = nn.Dropout(p=drop_p)
+
+	def forward(self, image_features, question_wids, answer_aids):
+		batch_size = image_features.size(0)
+		assert(image_features.size(1) == self.knn_size + 1)
+
+		if not self.model_spec['v_emb']:
+			image_features = torch.rand([batch_size, self.knn_size + 1, self.dim_v])
+		v_orig = Variable(image_features[:, 0], requires_grad=True).cuda()
+		v_knns = Variable(image_features[:, 1:], requires_grad=True).cuda()
+
+		if self.model_spec['q_emb'] or self.model_spec['z_emb']:
+			a_orig, z_orig, a_knns, z_knns, q_emb = self.vqa_forward(image_features, question_wids)
+		else:
+			if not self.model_spec['q_emb']:
+				q_emb = Variable(torch.rand([batch_size, self.dim_q])).cuda()
+			if not self.model_spec['z_emb']:
+				z_orig = Variable(torch.rand([batch_size, self.dim_z])).cuda()
+				z_knns = Variable(torch.rand([batch_size, self.knn_size, self.dim_z])).cuda()
+
+		if self.model_spec['a_emb']:
+			a_emb_gt = self.answer_embedding(Variable(answer_aids))
+			a_knns = F.softmax(a_knns, dim=-1)
+			a_emb_knns = torch.bmm(a_knns, self.answer_embedding.weight.view(1, self.ans_size, self.dim_a).expand(batch_size, -1, -1))
+		else:
+			a_emb_gt = Variable(torch.rand([batch_size, self.dim_a])).cuda()
+			a_emb_knns = Variable(torch.rand([batch_size, self.knn_size, self.dim_a])).cuda()
+
+		scores = []
+
+		for i in range(self.knn_size):
+			v_other = v_knns[:, i]
+			z_other = z_knns[:, i]
+			a_emb_other = a_emb_knns[:, i]
+
+			# Compute visual features
+			if self.model_spec['v_mult']:
+				v_mult = v_orig * v_other
+			else:
+				v_mult = Variable(torch.zeros([batch_size, self.dim_v])).cuda()
+			if self.model_spec['v_dist']:
+				v_dist = F.pairwise_distance(v_orig, v_other)
+			else:
+				v_dist = Variable(torch.zeros([batch_size, 1])).cuda()
+			if self.model_spec['v_rank']:
+				v_rank = Variable(torch.zeros([batch_size, self.knn_size])).cuda()
+				v_rank[:, i] = 1
+			else:
+				v_rank = Variable(torch.rand([batch_size, self.knn_size])).cuda()
+
+			input = torch.cat((v_orig,
+							   v_other,
+							   v_mult,
+							   v_dist,
+							   v_rank,
+							   q_emb,
+							   z_orig,
+							   z_other,
+							   a_emb_gt,
+							   a_emb_other
+							   ),
+							   dim=1)
+
+			h = self.drop(self.relu(self.linear_1(input)))
+			if self.n_layers == 2:
+				h = self.drop(self.relu(self.linear_2(h)))
+			score = self.out(h)
+
+			scores.append(score)
+
+		scores = torch.cat(scores, dim=1)
+
+		return scores
+
+
 class PairwiseModel(CXModelBase):
 
 	def __init__(self, *args, **kwargs):
