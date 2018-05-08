@@ -17,8 +17,7 @@ coco:
     arch: fbresnet152
     mode: noatt
     size: 448
-    path_raw: '/datadrive/vqa.pytorch/data/coco/raw/train2014/'
-    path_features: '/datadrive/vqa.pytorch/data/coco/extract/arch,fbresnet152_size,448/'
+    path_raw: '/datadrive/vqa.pytorch/data/coco/extract/arch,fbresnet152_size,448/'
     path_knn: '/datadrive/vqa.pytorch/data/coco/knn/mscoco_train2014_nn_images.json'
 model:
     arch: MutanNoAtt
