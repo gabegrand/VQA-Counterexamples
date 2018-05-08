@@ -29,9 +29,11 @@ import vqa.lib.criterions as criterions
 import vqa.datasets as datasets
 import vqa.models as models
 from vqa.models.cx import (RandomBaseline, DistanceBaseline, BlackBox,
-    LinearContext, PairwiseModel, PairwiseLinearModel, SemanticBaseline)
+                           LinearContext, PairwiseModel, PairwiseLinearModel, SemanticBaseline)
 
 from train import load_checkpoint as load_vqa_checkpoint
+
+from cx_visu import viz_knns, viz_qa
 
 
 parser = argparse.ArgumentParser()
@@ -63,14 +65,18 @@ parser.add_argument('-p', '--print_freq', default=10, type=int,
 parser.add_argument('-v', '--eval_freq', default=-1, type=int,
                     help='eval frequency')
 
-parser.add_argument('--pairwise', action='store_true', help='Pairwise training')
+parser.add_argument('--pairwise', action='store_true',
+                    help='Pairwise training')
 
 group = parser.add_mutually_exclusive_group(required=False)
-group.add_argument('--pretrained_vqa', dest='pretrained_vqa', action='store_true')
-group.add_argument('--untrained_vqa', dest='pretrained_vqa', action='store_false')
+group.add_argument('--pretrained_vqa',
+                   dest='pretrained_vqa', action='store_true')
+group.add_argument('--untrained_vqa', dest='pretrained_vqa',
+                   action='store_false')
 parser.set_defaults(pretrained_vqa=True)
 
-parser.add_argument('--trainable_vqa', action='store_true', help='If true, backprop through VQA model')
+parser.add_argument('--trainable_vqa', action='store_true',
+                    help='If true, backprop through VQA model')
 
 parser.add_argument('-dev', '--dev_mode', action='store_true')
 
@@ -79,9 +85,9 @@ def main():
 
     args = parser.parse_args()
 
-    #########################################################################################
+    ##########################################################################
     # Create options
-    #########################################################################################
+    ##########################################################################
 
     options = {
         'optim': {
@@ -96,9 +102,9 @@ def main():
     options = utils.update_values(options, options_yaml)
     options['vgenome'] = None
 
-    #########################################################################################
+    ##########################################################################
     # Bookkeeping
-    #########################################################################################
+    ##########################################################################
 
     if args.resume:
         run_name = args.resume
@@ -125,42 +131,54 @@ def main():
         # Tensorboard log directory
         log_dir = os.path.join('runs', run_name)
 
+    viz_dir = os.path.join('viz', 'cx', run_name)
+    if os.path.isdir(viz_dir):
+        if click.confirm('Save directory already exists in {}. Erase?'.format(save_dir)):
+            os.system('rm -r ' + save_dir)
+        else:
+            return
+    os.makedirs(viz_dir)
+
     train_writer = SummaryWriter(log_dir=os.path.join(log_dir, 'train'))
     val_writer = SummaryWriter(log_dir=os.path.join(log_dir, 'val'))
 
     print('Saving model to {}'.format(save_dir))
     print('Logging results to {}'.format(log_dir))
 
-    #########################################################################################
+    ##########################################################################
     # Create datasets
-    #########################################################################################
+    ##########################################################################
 
     print('=> Loading VQA dataset...')
     if args.dev_mode:
         trainset_fname = 'trainset_augmented_small.pickle'
     else:
         trainset_fname = 'trainset_augmented.pickle'
-    trainset = pickle.load(open(os.path.join(options['vqa']['path_trainset'], 'pickle_old', trainset_fname), 'rb'))
+    trainset = pickle.load(open(os.path.join(
+        options['vqa']['path_trainset'], 'pickle_old', trainset_fname), 'rb'))
 
     # if not args.dev_mode:
     valset_fname = 'valset_augmented_small.pickle'
-    valset = pickle.load(open(os.path.join(options['vqa']['path_trainset'], 'pickle_old', valset_fname), 'rb'))
+    valset = pickle.load(open(os.path.join(
+        options['vqa']['path_trainset'], 'pickle_old', valset_fname), 'rb'))
 
     print('=> Loading KNN data...')
     knns = json.load(open(options['coco']['path_knn'], 'r'))
-    knns = {int(k):v for k,v in knns.items()}
+    knns = {int(k): v for k, v in knns.items()}
 
     print('=> Loading COCO image features...')
-    features_train = h5py.File(os.path.join(options['coco']['path_raw'], 'trainset.hdf5'), 'r').get('noatt')
+    features_train = h5py.File(os.path.join(
+        options['coco']['path_features'], 'trainset.hdf5'), 'r').get('noatt')
     features_train = np.array(features_train)
 
     # if not args.dev_mode:
-    features_val = h5py.File(os.path.join(options['coco']['path_raw'], 'valset.hdf5'), 'r').get('noatt')
+    features_val = h5py.File(os.path.join(
+        options['coco']['path_features'], 'valset.hdf5'), 'r').get('noatt')
     features_val = np.array(features_val)
 
-    #########################################################################################
+    ##########################################################################
     # Create model
-    #########################################################################################
+    ##########################################################################
     print('=> Building model...')
 
     vqa_model = None
@@ -171,37 +189,48 @@ def main():
         cx_model = DistanceBaseline(knn_size=24)
     else:
         vqa_model = models.factory(options['model'],
-                                   trainset['vocab_words'], trainset['vocab_answers'],
+                                   trainset['vocab_words'], trainset[
+                                       'vocab_answers'],
                                    cuda=True, data_parallel=True)
         vqa_model = vqa_model.module
         if args.pretrained_vqa:
-            load_vqa_checkpoint(vqa_model, None, os.path.join(options['logs']['dir_logs'], 'best'))
+            load_vqa_checkpoint(vqa_model, None, os.path.join(
+                options['logs']['dir_logs'], 'best'))
 
         if args.cx_model == "BlackBox":
-            cx_model = BlackBox(vqa_model, knn_size=24, trainable_vqa=args.trainable_vqa)
+            cx_model = BlackBox(vqa_model, knn_size=24,
+                                trainable_vqa=args.trainable_vqa)
         elif args.cx_model == "LinearContext":
-            cx_model = LinearContext(vqa_model, knn_size=24, trainable_vqa=args.trainable_vqa)
+            cx_model = LinearContext(
+                vqa_model, knn_size=24, trainable_vqa=args.trainable_vqa)
         elif args.cx_model == "SemanticBaseline":
             if args.sb_lambda is None:
-                raise ValueError("If semantic baseline is selected then --sb_lambda must also be provided.")
-            cx_model = SemanticBaseline(vqa_model, knn_size=24, trainable_vqa=args.trainable_vqa)
+                raise ValueError(
+                    "If semantic baseline is selected then --sb_lambda must also be provided.")
+            cx_model = SemanticBaseline(
+                vqa_model, knn_size=24, trainable_vqa=args.trainable_vqa)
             cx_model.set_lambda(args.sb_lambda)
-            emb = pickle.load(open(os.path.join(options['vqa']['path_trainset'], "answer_embedding.pickle"), 'rb'))
+            emb = pickle.load(open(os.path.join(
+                options['vqa']['path_trainset'], "answer_embedding.pickle"), 'rb'))
             cx_model.set_answer_embedding(emb)
         elif args.cx_model == "PairwiseModel":
             assert(args.pairwise)
-            cx_model = PairwiseModel(vqa_model, knn_size=2, trainable_vqa=args.trainable_vqa)
+            cx_model = PairwiseModel(
+                vqa_model, knn_size=2, trainable_vqa=args.trainable_vqa)
         elif args.cx_model == "PairwiseLinearModel":
-            cx_model = PairwiseLinearModel(vqa_model, knn_size=24, trainable_vqa=args.trainable_vqa)
+            cx_model = PairwiseLinearModel(
+                vqa_model, knn_size=24, trainable_vqa=args.trainable_vqa)
         else:
             raise ValueError("Unrecognized cx_model {}".format(args.cx_model))
 
-        optimizer = torch.optim.Adam(cx_model.parameters(), lr=options['optim']['lr'])
+        optimizer = torch.optim.Adam(
+            cx_model.parameters(), lr=options['optim']['lr'])
 
     print("Built {}".format(args.cx_model))
 
     if args.resume:
-        info, start_epoch, best_recall = load_cx_checkpoint(cx_model, save_dir, resume_best=args.best)
+        info, start_epoch, best_recall = load_cx_checkpoint(
+            cx_model, save_dir, resume_best=args.best)
     else:
         info = []
         start_epoch = 1
@@ -209,9 +238,9 @@ def main():
 
     cx_model.cuda()
 
-    #########################################################################################
+    ##########################################################################
     # Train loop
-    #########################################################################################
+    ##########################################################################
     print('=> Starting training...')
 
     if args.pairwise:
@@ -230,7 +259,8 @@ def main():
 
         criterion = nn.CrossEntropyLoss(size_average=False)
 
-        trainset_batched = batchify(trainset['examples_list'], batch_size=options['optim']['batch_size'])
+        trainset_batched = batchify(trainset['examples_list'], batch_size=options[
+                                    'optim']['batch_size'])
         for batch in tqdm(trainset_batched):
             assert(cx_model.training)
             if vqa_model is not None:
@@ -239,7 +269,8 @@ def main():
                 else:
                     assert(not vqa_model.training)
 
-            image_features, question_wids, answer_aids, comp_idxs = getDataFromBatch(batch, features_train, trainset['name_to_index'], pairwise=args.pairwise)
+            image_features, question_wids, answer_aids, comp_idxs = getDataFromBatch(
+                batch, features_train, trainset['name_to_index'], pairwise=args.pairwise)
 
             scores = cx_model(image_features, question_wids, answer_aids)
 
@@ -247,10 +278,9 @@ def main():
                 assert(scores.size(1) == 2)
                 zeros = Variable(torch.LongTensor([0] * len(batch))).cuda()
                 loss = criterion(scores, zeros) / len(batch)
-                correct1 = recallAtK(scores, zeros, k=1)
+                correct = recallAtK(scores, zeros, k=1)
             else:
-                correct1 = recallAtK(scores, comp_idxs, k=1)
-                correct5 = recallAtK(scores, comp_idxs, k=5)
+                correct = recallAtK(scores, comp_idxs, k=5)
                 loss = criterion(scores, comp_idxs) / len(batch)
 
             if optimizer is not None:
@@ -264,38 +294,70 @@ def main():
                 if args.pairwise:
                     metrics = {
                         'loss_pairwise': float(loss),
-                        'acc_pairwise': (correct1.sum() / len(batch))
+                        'acc_pairwise': (correct.sum() / len(batch))
                     }
                 else:
                     metrics = {
                         'loss': float(loss),
-                        'recall_1': (correct1.sum() / len(batch)),
-                        'recall_5': (correct5.sum() / len(batch))
+                        'recall': (correct.sum() / len(batch))
                     }
-                log_results(train_writer, mode='train', epoch=epoch, i=((epoch - 1) * len(trainset_batched)) + train_b, metrics=metrics)
+                log_results(train_writer, mode='train', epoch=epoch, i=(
+                    (epoch - 1) * len(trainset_batched)) + train_b, metrics=metrics)
 
             if (args.eval_freq > 0 and train_b % args.eval_freq == 0) or train_b == len(trainset_batched):
-                eval_results = eval_model(cx_model, valset, features_val, options['optim']['batch_size'], pairwise=args.pairwise)
-                log_results(val_writer, mode='val', epoch=epoch, i=((epoch - 1) * len(trainset_batched)) + train_b, metrics=eval_results)
+                eval_results = eval_model(cx_model, valset, features_val, options[
+                                          'optim']['batch_size'], pairwise=args.pairwise)
+                log_results(val_writer, mode='val', epoch=epoch, i=(
+                    (epoch - 1) * len(trainset_batched)) + train_b, metrics=eval_results)
 
         info.append(eval_results)
 
-        if info[-1]['recall_5'] > best_recall:
+        if info[-1]['recall'] > best_recall:
             is_best = True
-            best_recall = info[-1]['recall_5']
+            best_recall = info[-1]['recall']
         else:
             is_best = False
 
         save_cx_checkpoint(cx_model, info, save_dir, is_best=is_best)
 
-    eval_results = eval_model(cx_model, valset, features_val, options['optim']['batch_size'], pairwise=args.pairwise)
-    log_results(val_writer, mode='val', epoch=0, i=0, metrics=eval_results)
+    # eval_results = eval_model(cx_model, valset, features_val, options['optim']['batch_size'], pairwise=args.pairwise)
+    # log_results(val_writer, mode='val', epoch=0, i=0, metrics=eval_results)
+    visualize_results(cx_model, valset, features_val, 64,
+                      options['coco']['path_val_raw'], viz_dir)
 
+
+def visualize_results(cx_model, valset, features_val, num_images, datadir, viz_dir):
+    print('Building visualizations and saving to', viz_dir)
+    cx_model.eval()
+
+    valset_batched = batchify(valset['examples_list'], batch_size=num_images)
+    batch = valset_batched[0]
+    cx_model.knn_size = 24
+    image_features, question_wids, answer_aids, comp_idxs = getDataFromBatch(
+        batch, features_val, valset['name_to_index'], pairwise=False)
+    a_orig, z_orig, a_knns, z_knns = cx_model.vqa_forward(
+        image_features, question_wids)
+    for i, (ex, a, knn) in tqdm(enumerate(zip(batch, a_orig, a_knns))):
+        img_name = ex['image_name']
+        knns = ex['knns']
+        question = ex['question']
+        answer = ex['answer']
+        comp = ex['comp']['image_name']
+        _, a_knns_idx = knn.max(dim=1)
+        a_knns_idx = a_knns_idx.cpu().data.numpy()
+        a_knns_words = [valset['vocab_answers'][w] for w in a_knns_idx]
+        try:
+            viz_knns(datadir, img_name, knns, comp, question, answer,
+                     24, outfile=os.path.join(viz_dir, 'viz_knns_' + str(i) + '.jpg'))
+            viz_qa(datadir, img_name, knns, comp, question, answer,
+                   a_knns_words[:5], 5, outfile=os.path.join(viz_dir, 'viz_qa' + str(i) + '.jpg'))
+        except Exception as e:
+            continue
 
 def eval_model(cx_model, valset, features_val, batch_size, pairwise=False):
     cx_model.eval()
 
-    val_i = val_correct1 = val_correct5 = val_loss = 0
+    val_i = val_correct = val_loss = 0
     val_pairwise_correct = val_pairwise_loss = 0
 
     criterion = nn.CrossEntropyLoss(size_average=False)
@@ -304,16 +366,18 @@ def eval_model(cx_model, valset, features_val, batch_size, pairwise=False):
     for batch in tqdm(valset_batched):
 
         cx_model.knn_size = 24
-        image_features, question_wids, answer_aids, comp_idxs = getDataFromBatch(batch, features_val, valset['name_to_index'], pairwise=False)
+        image_features, question_wids, answer_aids, comp_idxs = getDataFromBatch(
+            batch, features_val, valset['name_to_index'], pairwise=False)
         scores = cx_model(image_features, question_wids, answer_aids)
         val_loss += float(criterion(scores, comp_idxs))
-        val_correct1 += recallAtK(scores, comp_idxs, k=1).sum()
-        val_correct5 += recallAtK(scores, comp_idxs, k=5).sum()
+        correct = recallAtK(scores, comp_idxs, k=5)
+        val_correct += correct.sum()
         val_i += len(batch)
 
         if pairwise:
             cx_model.knn_size = 2
-            image_features, question_wids, answer_aids, comp_idxs = getDataFromBatch(batch, features_val, valset['name_to_index'], pairwise=True)
+            image_features, question_wids, answer_aids, comp_idxs = getDataFromBatch(
+                batch, features_val, valset['name_to_index'], pairwise=True)
             scores = cx_model(image_features, question_wids, answer_aids)
             zeros = Variable(torch.LongTensor([0] * len(batch))).cuda()
             val_pairwise_loss += float(criterion(scores, zeros))
@@ -321,8 +385,7 @@ def eval_model(cx_model, valset, features_val, batch_size, pairwise=False):
 
     results = {
         'loss': (val_loss / val_i),
-        'recall_1': (val_correct1/ val_i),
-        'recall_5': (val_correct5 / val_i),
+        'recall': (val_correct / val_i),
     }
 
     if pairwise:
@@ -346,7 +409,7 @@ def recallAtK(scores, ground_truth, k=5):
     assert(scores.shape[0] == ground_truth.shape[0])
     _, top_idxs = scores.topk(k)
     ground_truth = ground_truth.cpu().data.numpy()
-    return (Tensor(ground_truth.reshape((-1, 1))).expand_as(top_idxs).numpy() == \
+    return (Tensor(ground_truth.reshape((-1, 1))).expand_as(top_idxs).numpy() ==
             top_idxs.cpu().data.numpy()).sum(axis=1)
 
 
@@ -355,7 +418,8 @@ def batchify(example_list, batch_size, shuffle=True):
         random.shuffle(example_list)
     batched_dataset = []
     for i in range(0, len(example_list), batch_size):
-        batched_dataset.append(example_list[i:min(i + batch_size, len(example_list))])
+        batched_dataset.append(
+            example_list[i:min(i + batch_size, len(example_list))])
     return batched_dataset
 
 
@@ -380,10 +444,12 @@ def getDataFromBatch(batch, features, name_to_index, pairwise=False):
         comp_idxs.append(ex['comp']['knn_index'])
 
     # TODO: Make call to .cuda() conditional on model type
-    image_features = torch.from_numpy(np.array([features[idxs] for idxs in image_idxs])).cuda()
+    image_features = torch.from_numpy(
+        np.array([features[idxs] for idxs in image_idxs])).cuda()
     question_wids = torch.LongTensor(question_wids).cuda()
     answer_aids = torch.LongTensor(answer_aids).cuda()
-    comp_idxs = Variable(torch.LongTensor(comp_idxs), requires_grad=False).cuda()
+    comp_idxs = Variable(torch.LongTensor(comp_idxs),
+                         requires_grad=False).cuda()
 
     return image_features, question_wids, answer_aids, comp_idxs
 
@@ -418,7 +484,7 @@ def load_cx_checkpoint(cx_model, save_dir, resume_best=True):
     last_epoch = len(info)
     print('Epoch {}: {}'.format(last_epoch, info[-1]))
 
-    return info, last_epoch + 1, info[-1]['recall_5']
+    return info, last_epoch + 1, info[-1]['recall']
 
 
 def check_grad(cx_model):
