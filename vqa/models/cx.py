@@ -250,8 +250,10 @@ class NeuralModel(CXModelBase):
 					  1
 					  )
 		self.linear_1 = nn.Linear(input_size, self.dim_h)
-		if self.n_layers == 2:
+		if self.n_layers >= 2:
 			self.linear_2 = nn.Linear(self.dim_h, self.dim_h)
+		if self.n_layers >= 3:
+			self.linear_3 = nn.Linear(self.dim_h, self.dim_h)
 		self.out = nn.Linear(self.dim_h, 1)
 		self.relu = nn.ReLU()
 		self.drop = nn.Dropout(p=drop_p)
@@ -261,7 +263,7 @@ class NeuralModel(CXModelBase):
 		assert(image_features.size(1) == self.knn_size + 1)
 
 		if not self.model_spec['v_emb']:
-			image_features = torch.rand([batch_size, self.knn_size + 1, self.dim_v])
+			image_features = torch.rand([batch_size, self.knn_size + 1, self.dim_v]).cuda()
 		v_orig = Variable(image_features[:, 0], requires_grad=True).cuda()
 		v_knns = Variable(image_features[:, 1:], requires_grad=True).cuda()
 
@@ -318,8 +320,10 @@ class NeuralModel(CXModelBase):
 							   dim=1)
 
 			h = self.drop(self.relu(self.linear_1(input)))
-			if self.n_layers == 2:
+			if self.n_layers >= 2:
 				h = self.drop(self.relu(self.linear_2(h)))
+			if self.n_layers >= 3:
+				h = self.drop(self.relu(self.linear_3(h)))
 			score = self.out(h)
 
 			scores.append(score)
