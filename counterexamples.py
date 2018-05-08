@@ -110,11 +110,8 @@ def main():
     # Bookkeeping
     #########################################################################################
 
-    if args.cx_model == 'NeuralModel':
-        assert(os.path.exists(args.model_spec))
-        if not args.comment:
-            model_spec = json.load(open(args.model_spec, 'r'))
-            args.comment = model_spec['name']
+    if args.cx_model == 'NeuralModel' and not args.comment:
+        args.comment = options['cx_model']['name']
 
     if args.resume:
         run_name = args.resume
@@ -205,9 +202,7 @@ def main():
             emb = pickle.load(open(os.path.join(options['vqa']['path_trainset'], "answer_embedding.pickle"), 'rb'))
             cx_model.set_answer_embedding(emb)
         elif args.cx_model == "NeuralModel":
-
-            model_spec = json.load(open(args.model_spec, 'r'))
-            print(model_spec)
+            model_spec = options['cx_model']
 
             if model_spec['pretrained_emb']:
                 emb = pickle.load(open(os.path.join(options['vqa']['path_trainset'], "answer_embedding.pickle"), 'rb'))
