@@ -245,6 +245,7 @@ def main():
             cx_model.set_answer_embedding(emb)
         elif args.cx_model == "NeuralModel":
             model_spec = options['cx_model']
+            print(model_spec)
 
             if model_spec['pretrained_emb']:
                 emb = pickle.load(open(os.path.join(options['vqa']['path_trainset'], "answer_embedding.pickle"), 'rb'))
