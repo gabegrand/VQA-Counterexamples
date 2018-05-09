@@ -337,7 +337,8 @@ def visualize_results(cx_model, valset, features_val, num_images, datadir, viz_d
         batch, features_val, valset['name_to_index'], pairwise=False)
     a_orig, z_orig, a_knns, z_knns = cx_model.vqa_forward(
         image_features, question_wids)
-    for i, (ex, a, knn) in tqdm(enumerate(zip(batch, a_orig, a_knns))):
+    scores = cx_model(image_features, question_wids, answer_aids).cpu().data.numpy()
+    for i, (ex, a, knn, score) in tqdm(enumerate(zip(batch, a_orig, a_knns, scores))):
         img_name = ex['image_name']
         knns = ex['knns']
         question = ex['question']
@@ -346,6 +347,9 @@ def visualize_results(cx_model, valset, features_val, num_images, datadir, viz_d
         _, a_knns_idx = knn.max(dim=1)
         a_knns_idx = a_knns_idx.cpu().data.numpy()
         a_knns_words = [valset['vocab_answers'][w] for w in a_knns_idx]
+        score_knns = sorted(list(zip(score, knns)), reverse=True)
+
+        knns = [sk[1] for sk in score_knns]
         try:
             viz_knns(datadir, img_name, knns, comp, question, answer,
                      24, outfile=os.path.join(viz_dir, 'viz_knns_' + str(i) + '.jpg'))
