@@ -54,6 +54,9 @@ parser.add_argument('-b', '--batch_size', type=int,
 parser.add_argument('--epochs', type=int,
                     help='number of total epochs to run')
 
+parser.add_argument('--project_dir', default='/datadrive/vqa.pytorch/', type=str,
+                    help='path to project root whose data to use')
+
 parser.add_argument('--resume', default='', type=str,
                     help='path to latest checkpoint')
 parser.add_argument('--best', action='store_true',
@@ -107,20 +110,22 @@ def main():
     ##########################################################################
 
     if args.resume:
+        print('hello')
         run_name = args.resume
-        save_dir = os.path.join('logs', 'cx', run_name)
+        save_dir = os.path.join(args.project_dir, 'logs', 'cx', run_name)
         assert(os.path.isdir(save_dir))
 
         i = 1
-        log_dir = os.path.join('runs', run_name, 'resume_{}'.format(i))
+        log_dir = os.path.join(args.project_dir, 'runs', run_name, 'resume_{}'.format(i))
         while(os.path.isdir(log_dir)):
             i += 1
-            log_dir = os.path.join('runs', run_name, 'resume_{}'.format(i))
+            log_dir = os.path.join(args.project_dir, 'runs', run_name, 'resume_{}'.format(i))
     else:
+        print('why am i here')
         run_name = datetime.now().strftime('%b%d-%H-%M-%S')
         if args.comment:
             run_name += '_' + args.comment
-        save_dir = os.path.join('logs', 'cx', run_name)
+        save_dir = os.path.join(args.project_dir, 'logs', 'cx', run_name)
         if os.path.isdir(save_dir):
             if click.confirm('Save directory already exists in {}. Erase?'.format(save_dir)):
                 os.system('rm -r ' + save_dir)
@@ -129,12 +134,13 @@ def main():
         os.makedirs(os.path.join(save_dir, 'ckpt'))
         os.makedirs(os.path.join(save_dir, 'best'))
         # Tensorboard log directory
-        log_dir = os.path.join('runs', run_name)
+        log_dir = os.path.join(args.project_dir, 'runs', run_name)
 
-    viz_dir = os.path.join('viz', 'cx', run_name)
+    viz_dir = os.path.join(args.project_dir, 'viz', 'cx', run_name)
+    print('viz_dir', viz_dir, run_name)
     if os.path.isdir(viz_dir):
-        if click.confirm('Save directory already exists in {}. Erase?'.format(save_dir)):
-            os.system('rm -r ' + save_dir)
+        if click.confirm('Viz directory already exists in {}. Erase?'.format(viz_dir)):
+            os.system('rm -r ' + viz_dir)
         else:
             return
     os.makedirs(viz_dir)
@@ -344,16 +350,18 @@ def visualize_results(cx_model, valset, features_val, num_images, datadir, viz_d
         question = ex['question']
         answer = ex['answer']
         comp = ex['comp']['image_name']
+        comp_answer = ex['comp']['answer']
         _, a_knns_idx = knn.max(dim=1)
         a_knns_idx = a_knns_idx.cpu().data.numpy()
         a_knns_words = [valset['vocab_answers'][w] for w in a_knns_idx]
-        score_knns = sorted(list(zip(score, knns)), reverse=True)
+        score_knns = sorted(list(zip(score, knns, a_knns_words)), reverse=True)
 
         knns = [sk[1] for sk in score_knns]
+        a_knns_words = [sk[2] for sk in score_knns]
         try:
             viz_knns(datadir, img_name, knns, comp, question, answer,
                      24, outfile=os.path.join(viz_dir, 'viz_knns_' + str(i) + '.jpg'))
-            viz_qa(datadir, img_name, knns, comp, question, answer,
+            viz_qa(datadir, img_name, knns, comp, question, answer, comp_answer,
                    a_knns_words[:5], 5, outfile=os.path.join(viz_dir, 'viz_qa' + str(i) + '.jpg'))
         except Exception as e:
             continue
