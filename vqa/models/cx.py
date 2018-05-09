@@ -72,35 +72,36 @@ class CXModelBase(nn.Module):
 
 		if self.trainable_vqa:
 			v_emb.requires_grad = True
-			q_emb.requires_grad = True
 		else:
+			q_emb = q_emb.detach()
 			# TODO: Unclear if this is redundant, but better safe than sorry
 			self.vqa_model.eval()
 			for p in self.vqa_model.parameters():
 				p.requires_grad = False
 
 		# Duplicate each question knn_size + 1 times
-		q_emb = q_emb.view(batch_size, 1, -1).expand(batch_size, self.knn_size +
-													 1, -1).contiguous().view(batch_size * (self.knn_size + 1), -1)
+		q_emb_dup = q_emb.view(batch_size, 1, -1).expand(batch_size,
+			self.knn_size + 1, -1).contiguous().view(batch_size * (self.knn_size + 1), -1)
 
 		# Run the VQA model
-		z = self.vqa_model._fusion(v_emb, q_emb)
+		z = self.vqa_model._fusion(v_emb, q_emb_dup)
 		a = self.vqa_model._classif(z)
 
 		a = a.view(batch_size, self.knn_size + 1, -1)
 		z = z.view(batch_size, self.knn_size + 1, -1)
 
+		a_orig = a[:, 0, :].contiguous()
+		z_orig = z[:, 0, :].contiguous()
+		a_knns = a[:, 1:, :].contiguous()
+		z_knns = z[:, 1:, :].contiguous()
+
 		if not self.trainable_vqa:
-			a = a.detach().data
-			z = z.detach().data
+			a_orig = Variable(a_orig.detach().data, requires_grad=True)
+			z_orig = Variable(z_orig.detach().data, requires_grad=True)
+			a_knns = Variable(a_knns.detach().data, requires_grad=True)
+			z_knns = Variable(z_knns.detach().data, requires_grad=True)
 
-		# Separate results into original and knns
-		a_orig = Variable(a[:, 0, :].contiguous(), requires_grad=True)
-		z_orig = Variable(z[:, 0, :].contiguous(), requires_grad=True)
-		a_knns = Variable(a[:, 1:, :].contiguous(), requires_grad=True)
-		z_knns = Variable(z[:, 1:, :].contiguous(), requires_grad=True)
-
-		return a_orig, z_orig, a_knns, z_knns
+		return a_orig, z_orig, a_knns, z_knns, q_emb
 
 	def forward(self, image_features, question_wids, answer_aids):
 		raise NotImplementedError
@@ -117,7 +118,7 @@ class BlackBox(CXModelBase):
 		self.vqa_model.eval()
 
 	def forward(self, image_features, question_wids, answer_aids):
-		_, _, a_knns, _ = self.vqa_forward(image_features, question_wids)
+		_, _, a_knns, _, _ = self.vqa_forward(image_features, question_wids)
 
 		# VQA model's score for the original answer for each KNN
 		scores_list = []
@@ -144,7 +145,7 @@ class LinearContext(CXModelBase):
 		self.linear = nn.Linear(self.knn_size * self.dim_z, self.knn_size)
 
 	def forward(self, image_features, question_wids, answer_aids):
-		a_orig, z_orig, a_knns, z_knns = self.vqa_forward(
+		a_orig, z_orig, a_knns, z_knns, _ = self.vqa_forward(
 			image_features, question_wids)
 
 		assert(z_knns.requires_grad)
@@ -179,7 +180,7 @@ class SemanticBaseline(CXModelBase):
 		return dist
 
 	def forward(self, image_features, question_wids, answer_aids):
-		a_orig, z_orig, a_knns, z_knns = self.vqa_forward(
+		a_orig, z_orig, a_knns, z_knns, _ = self.vqa_forward(
 			image_features, question_wids)
 		a_orig = a_orig.cpu().data.numpy()
 		a_knns = a_knns.cpu().data.numpy()
@@ -213,6 +214,125 @@ class SemanticBaseline(CXModelBase):
 		# scores = self.linear(z_knns.view(-1, self.knn_size * self.dim_z))
 		# TODO: dropout
 
+
+class NeuralModel(CXModelBase):
+
+	def __init__(self, model_spec, dim_h, n_layers, emb, drop_p, **kwargs):
+
+		super().__init__(vqa_model=kwargs['vqa_model'],
+						 knn_size=kwargs['knn_size'],
+						 trainable_vqa=kwargs['trainable_vqa'])
+
+		assert(self.knn_size == 24)
+
+		self.model_spec = model_spec
+
+		self.dim_v = self.vqa_model.opt['fusion']['dim_v']
+		self.dim_q = self.vqa_model.opt['fusion']['dim_q']
+		self.dim_z = self.vqa_model.opt['fusion']['dim_mm']
+
+		self.ans_size = len(self.vqa_model.vocab_answers)
+		self.dim_a = 2400
+
+		self.dim_h = dim_h
+		self.n_layers = n_layers
+
+		self.answer_embedding = nn.Embedding(self.ans_size, self.dim_a)
+		if emb is not None:
+			assert(emb.shape[1] == self.dim_a)
+			self.answer_embedding.weight.data = torch.FloatTensor(emb).cuda()
+
+		input_size = (self.dim_v * 3 +
+					  self.dim_a * 2 +
+					  self.dim_z * 2 +
+					  self.dim_q +
+					  self.knn_size +
+					  1
+					  )
+		self.linear_1 = nn.Linear(input_size, self.dim_h)
+		if self.n_layers >= 2:
+			self.linear_2 = nn.Linear(self.dim_h, self.dim_h)
+		if self.n_layers >= 3:
+			self.linear_3 = nn.Linear(self.dim_h, self.dim_h)
+		self.out = nn.Linear(self.dim_h, 1)
+		self.relu = nn.ReLU()
+		self.drop = nn.Dropout(p=drop_p)
+
+	def forward(self, image_features, question_wids, answer_aids):
+		batch_size = image_features.size(0)
+		assert(image_features.size(1) == self.knn_size + 1)
+
+		if not self.model_spec['v_emb']:
+			image_features = torch.rand([batch_size, self.knn_size + 1, self.dim_v]).cuda()
+		v_orig = Variable(image_features[:, 0], requires_grad=True).cuda()
+		v_knns = Variable(image_features[:, 1:], requires_grad=True).cuda()
+
+		if self.model_spec['q_emb'] or self.model_spec['z_emb']:
+			a_orig, z_orig, a_knns, z_knns, q_emb = self.vqa_forward(image_features, question_wids)
+		else:
+			if not self.model_spec['q_emb']:
+				q_emb = Variable(torch.rand([batch_size, self.dim_q])).cuda()
+			if not self.model_spec['z_emb']:
+				z_orig = Variable(torch.rand([batch_size, self.dim_z])).cuda()
+				z_knns = Variable(torch.rand([batch_size, self.knn_size, self.dim_z])).cuda()
+
+		if self.model_spec['a_emb']:
+			a_emb_gt = self.answer_embedding(Variable(answer_aids))
+			a_knns = F.softmax(a_knns, dim=-1)
+			a_emb_knns = torch.bmm(a_knns, self.answer_embedding.weight.view(1, self.ans_size, self.dim_a).expand(batch_size, -1, -1))
+		else:
+			a_emb_gt = Variable(torch.rand([batch_size, self.dim_a])).cuda()
+			a_emb_knns = Variable(torch.rand([batch_size, self.knn_size, self.dim_a])).cuda()
+
+		scores = []
+
+		for i in range(self.knn_size):
+			v_other = v_knns[:, i]
+			z_other = z_knns[:, i]
+			a_emb_other = a_emb_knns[:, i]
+
+			# Compute visual features
+			if self.model_spec['v_mult']:
+				v_mult = v_orig * v_other
+			else:
+				v_mult = Variable(torch.zeros([batch_size, self.dim_v])).cuda()
+			if self.model_spec['v_dist']:
+				v_dist = F.pairwise_distance(v_orig, v_other)
+			else:
+				v_dist = Variable(torch.zeros([batch_size, 1])).cuda()
+			if self.model_spec['v_rank']:
+				v_rank = Variable(torch.zeros([batch_size, self.knn_size])).cuda()
+				v_rank[:, i] = 1
+			else:
+				v_rank = Variable(torch.rand([batch_size, self.knn_size])).cuda()
+
+			input = torch.cat((v_orig,
+							   v_other,
+							   v_mult,
+							   v_dist,
+							   v_rank,
+							   q_emb,
+							   z_orig,
+							   z_other,
+							   a_emb_gt,
+							   a_emb_other
+							   ),
+							   dim=1)
+
+			h = self.drop(self.relu(self.linear_1(input)))
+			if self.n_layers >= 2:
+				h = self.drop(self.relu(self.linear_2(h)))
+			if self.n_layers >= 3:
+				h = self.drop(self.relu(self.linear_3(h)))
+			score = self.out(h)
+
+			scores.append(score)
+
+		scores = torch.cat(scores, dim=1)
+
+		return scores
+
+
 class PairwiseModel(CXModelBase):
 
 	def __init__(self, *args, **kwargs):
@@ -235,10 +355,7 @@ class PairwiseModel(CXModelBase):
 
 		v_orig = image_features[:, 0]
 
-		# TODO: this is redundant, can get from VQA forward
-		q_emb = self.vqa_model.seq2vec(Variable(question_wids)).detach().data
-
-		_, z_orig, _, z_knns = self.vqa_forward(image_features, question_wids)
+		_, z_orig, _, z_knns, q_emb = self.vqa_forward(image_features, question_wids)
 		z_knns = z_knns.detach().data
 
 		scores = []
@@ -271,33 +388,33 @@ class PairwiseLinearModel(CXModelBase):
 		self.dim_z = self.vqa_model.opt['fusion']['dim_mm']
 
 		self.dim_h = 300
+		self.dim_a = 300
 
-		self.linear = nn.Linear(
-			(2 * self.dim_v) + self.dim_q + self.dim_z, self.dim_h)
+		self.answer_embedding = nn.Embedding(len(self.vqa_model.vocab_answers),
+			self.dim_a)
+
+		self.linear = nn.Linear((2 * self.dim_v) + self.dim_q + (2 * self.dim_z)
+			+ self.dim_a, self.dim_h)
 		self.out = nn.Linear(self.dim_h, 1)
-		self.final = nn.Linear(self.knn_size, self.knn_size)
 		self.relu = nn.ReLU()
 
 	def forward(self, image_features, question_wids, answer_aids):
 		n_preds = image_features.size(1) - 1
 		assert(n_preds == self.knn_size)
 
-		v_orig = image_features[:, 0]
+		v_orig = Variable(image_features[:, 0])
 
-		# TODO: this is redundant, can get from VQA forward
-		q_emb = self.vqa_model.seq2vec(Variable(question_wids)).detach().data
+		_, z_orig, _, z_knns, q_emb = self.vqa_forward(image_features, question_wids)
 
-		_, z_orig, _, z_knns = self.vqa_forward(image_features, question_wids)
-		z_knns = z_knns.detach().data
+		a_emb = self.answer_embedding(Variable(answer_aids))
 
 		scores = []
 
 		for i in range(n_preds):
-			v_other = image_features[:, i + 1]
+			v_other = Variable(image_features[:, i + 1])
 			z_other = z_knns[:, i]
 
-			input = Variable(
-				torch.cat((v_orig, v_other, q_emb, z_other), dim=1), requires_grad=True)
+			input = torch.cat((v_orig, v_other, q_emb, z_orig, z_other, a_emb), dim=1)
 			h = self.relu(self.linear(input))
 			score = self.relu(self.out(h))
 
@@ -305,6 +422,97 @@ class PairwiseLinearModel(CXModelBase):
 
 		scores = torch.cat(scores, dim=1)
 
-		scores = self.final(scores)
+		return scores
+
+
+class ContrastiveModel(CXModelBase):
+
+	def __init__(self, *args, **kwargs):
+		super().__init__(*args, **kwargs)
+
+		self.dim_v = self.vqa_model.opt['fusion']['dim_v']
+		self.dim_q = self.vqa_model.opt['fusion']['dim_q']
+		self.dim_z = self.vqa_model.opt['fusion']['dim_mm']
+
+		self.dim_h = 300
+
+		self.dim_a = 300
+		self.answer_embedding = nn.Embedding(len(self.vqa_model.vocab_answers),
+			self.dim_a)
+
+		# self.linear = nn.Linear(self.dim_v + self.dim_q + self.dim_z
+		# 	+ self.dim_a, self.dim_h)
+		self.linear = nn.Linear(self.dim_v + self.dim_z, self.dim_h)
+		self.relu = nn.ReLU()
+
+	def forward(self, image_features, question_wids, answer_aids):
+		batch_size = image_features.size(0)
+		n_preds = image_features.size(1)
+		assert(n_preds == self.knn_size + 1)
+
+		v_all = Variable(image_features)
+
+		_, z_orig, _, z_knns, q_emb = self.vqa_forward(image_features, question_wids)
+		z_all = torch.cat([z_orig.view(batch_size, 1, self.dim_z), z_knns], dim=1)
+
+		# a_emb = self.answer_embedding(Variable(answer_aids))
+
+		out = Variable(torch.zeros([batch_size, n_preds, self.dim_h])).cuda()
+		for i in range(n_preds):
+			v = v_all[:, i]
+			# q = q_emb
+			# a = a_emb
+			z = z_all[:, i]
+			out[:, i] = self.get_hidden(v, z)
+
+		return out
+
+	def get_hidden(self, v, z):
+		input = torch.cat([v, z], dim=1)
+		return self.relu(self.linear(input))
+
+	# def get_hidden(self, v, q, a, z):
+	# 	input = torch.cat([v, q, a, z], dim=1)
+	# 	return self.relu(self.linear(input))
+
+	def get_scores(self, h_orig, h_knns):
+		batch_size = h_orig.size(0)
+		n_preds = h_knns.size(1)
+
+		scores = Variable(torch.zeros([batch_size, n_preds]))
+		for i in range(n_preds):
+			euclidean_distance = F.pairwise_distance(h_orig, h_knns[:, i])
+			scores[:, i] = euclidean_distance
 
 		return scores
+
+
+class SimilarityModel(CXModelBase):
+
+	def __init__(self, *args, **kwargs):
+		super().__init__(*args, **kwargs)
+		self.dim_z = self.vqa_model.opt['fusion']['dim_mm']
+
+	def forward(self, image_features, question_wids, answer_aids):
+		batch_size = image_features.size(0)
+
+		a_orig, z_orig, a_knns, z_knns, _ = self.vqa_forward(
+			image_features, question_wids)
+
+		v_orig = image_features[:, 0]
+		v_cossim = torch.zeros([batch_size, self.knn_size])
+
+		z_orig = z_orig.data
+		z_knns = z_knns.data
+		z_cossim = torch.zeros([batch_size, self.knn_size])
+
+		a_xent = torch.zeros([batch_size, self.knn_size])
+
+		for i in range(self.knn_size):
+			v_cossim[:, i] = F.cosine_similarity(v_orig, image_features[:, i+1])
+			z_cossim[:, i] = F.cosine_similarity(z_orig, z_knns[:, i])
+			a_xent[:, i] = F.cross_entropy(a_knns[:, i], Variable(answer_aids), reduce=False).data
+
+		scores = v_cossim + z_cossim + a_xent
+
+		return Variable(scores).cuda()

@@ -10,7 +10,6 @@ import shutil
 import yaml
 
 from datetime import datetime
-from IPython.display import Image, display
 from pprint import pprint
 from tqdm import tqdm
 
@@ -29,7 +28,8 @@ import vqa.lib.criterions as criterions
 import vqa.datasets as datasets
 import vqa.models as models
 from vqa.models.cx import (RandomBaseline, DistanceBaseline, BlackBox,
-                           LinearContext, PairwiseModel, PairwiseLinearModel, SemanticBaseline)
+    LinearContext, PairwiseModel, PairwiseLinearModel, SemanticBaseline,
+    SimilarityModel, NeuralModel)
 
 from train import load_checkpoint as load_vqa_checkpoint
 
@@ -38,12 +38,11 @@ from cx_visu import viz_knns, viz_qa
 
 parser = argparse.ArgumentParser()
 
-parser.add_argument('--path_opt', default='options/vqa2/counterexamples_default.yaml',
+parser.add_argument('--path_opt', default='options/cx/counterexamples_default.yaml',
                     type=str, help='path to a yaml options file')
 
 parser.add_argument('-cx', '--cx_model', required=True,
                     type=str, help='Counterexample model type')
-
 
 parser.add_argument('-lr', '--learning_rate', type=float,
                     help='initial learning rate')
@@ -58,15 +57,18 @@ parser.add_argument('--project_dir', default='/datadrive/vqa.pytorch/', type=str
                     help='path to project root whose data to use')
 
 parser.add_argument('--resume', default='', type=str,
-                    help='path to latest checkpoint')
+                    help='run name to resume')
 parser.add_argument('--best', action='store_true',
                     help='whether to resume best checkpoint')
 
 parser.add_argument('-c', '--comment', type=str, default='')
-parser.add_argument('-p', '--print_freq', default=10, type=int,
+parser.add_argument('-p', '--print_freq', default=100, type=int,
                     help='print frequency')
 parser.add_argument('-v', '--eval_freq', default=-1, type=int,
                     help='eval frequency')
+parser.add_argument('-t', '--test', action='store_true', help='Run eval on full testset after training')
+parser.add_argument('--viz', action='store_true', help='Run viz on valset after training')
+
 
 parser.add_argument('--pairwise', action='store_true',
                     help='Pairwise training')
@@ -76,6 +78,7 @@ group.add_argument('--pretrained_vqa',
                    dest='pretrained_vqa', action='store_true')
 group.add_argument('--untrained_vqa', dest='pretrained_vqa',
                    action='store_false')
+
 parser.set_defaults(pretrained_vqa=True)
 
 parser.add_argument('--trainable_vqa', action='store_true',
@@ -92,11 +95,17 @@ def main():
     # Create options
     ##########################################################################
 
+
+    # Parse options
     options = {
         'optim': {
             'lr': args.learning_rate,
             'batch_size': args.batch_size,
-            'epochs': args.epochs
+            'epochs': args.epochs,
+        },
+        'cx_model': {
+            'pretrained_vqa': args.pretrained_vqa,
+            'trainable_vqa': args.trainable_vqa,
         }
     }
 
@@ -105,9 +114,17 @@ def main():
     options = utils.update_values(options, options_yaml)
     options['vgenome'] = None
 
-    ##########################################################################
+
+    # Ensure determinism
+    random.seed(42)
+    torch.manual_seed(42)
+    torch.cuda.manual_seed_all(42)
+
     # Bookkeeping
     ##########################################################################
+
+    if args.cx_model == 'NeuralModel' and not args.comment:
+        args.comment = options['cx_model']['name']
 
     if args.resume:
         print('hello')
@@ -125,7 +142,9 @@ def main():
         run_name = datetime.now().strftime('%b%d-%H-%M-%S')
         if args.comment:
             run_name += '_' + args.comment
+
         save_dir = os.path.join(args.project_dir, 'logs', 'cx', run_name)
+
         if os.path.isdir(save_dir):
             if click.confirm('Save directory already exists in {}. Erase?'.format(save_dir)):
                 os.system('rm -r ' + save_dir)
@@ -156,17 +175,20 @@ def main():
     ##########################################################################
 
     print('=> Loading VQA dataset...')
-    if args.dev_mode:
-        trainset_fname = 'trainset_augmented_small.pickle'
-    else:
-        trainset_fname = 'trainset_augmented.pickle'
-    trainset = pickle.load(open(os.path.join(
-        options['vqa']['path_trainset'], 'pickle_old', trainset_fname), 'rb'))
 
-    # if not args.dev_mode:
-    valset_fname = 'valset_augmented_small.pickle'
-    valset = pickle.load(open(os.path.join(
-        options['vqa']['path_trainset'], 'pickle_old', valset_fname), 'rb'))
+    if options['optim']['epochs'] > 0:
+        if args.dev_mode:
+            trainset_fname = 'trainset_augmented_small.pickle'
+        else:
+            trainset_fname = 'trainset_augmented.pickle'
+        trainset = pickle.load(open(os.path.join(options['vqa']['path_trainset'], 'pickle_old', trainset_fname), 'rb'))
+
+        valset_fname = 'valset_augmented_small.pickle'
+        valset = pickle.load(open(os.path.join(options['vqa']['path_trainset'], 'pickle_old', valset_fname), 'rb'))
+
+    if args.test:
+        testset_fname = 'valset_augmented.pickle'
+        testset = pickle.load(open(os.path.join(options['vqa']['path_trainset'], 'pickle_old', testset_fname), 'rb'))
 
     print('=> Loading KNN data...')
     knns = json.load(open(options['coco']['path_knn'], 'r'))
@@ -180,6 +202,7 @@ def main():
     # if not args.dev_mode:
     features_val = h5py.File(os.path.join(
         options['coco']['path_features'], 'valset.hdf5'), 'r').get('noatt')
+
     features_val = np.array(features_val)
 
     ##########################################################################
@@ -215,10 +238,28 @@ def main():
                     "If semantic baseline is selected then --sb_lambda must also be provided.")
             cx_model = SemanticBaseline(
                 vqa_model, knn_size=24, trainable_vqa=args.trainable_vqa)
+
             cx_model.set_lambda(args.sb_lambda)
             emb = pickle.load(open(os.path.join(
                 options['vqa']['path_trainset'], "answer_embedding.pickle"), 'rb'))
             cx_model.set_answer_embedding(emb)
+        elif args.cx_model == "NeuralModel":
+            model_spec = options['cx_model']
+
+            if model_spec['pretrained_emb']:
+                emb = pickle.load(open(os.path.join(options['vqa']['path_trainset'], "answer_embedding.pickle"), 'rb'))
+            else:
+                emb = None
+
+            cx_model = NeuralModel(model_spec=model_spec,
+                                   dim_h=model_spec['dim_h'],
+                                   n_layers=model_spec['n_layers'],
+                                   emb=emb,
+                                   drop_p=model_spec['drop_p'],
+                                   vqa_model=vqa_model,
+                                   knn_size=24,
+                                   trainable_vqa=model_spec['trainable_vqa'])
+
         elif args.cx_model == "PairwiseModel":
             assert(args.pairwise)
             cx_model = PairwiseModel(
@@ -226,6 +267,7 @@ def main():
         elif args.cx_model == "PairwiseLinearModel":
             cx_model = PairwiseLinearModel(
                 vqa_model, knn_size=24, trainable_vqa=args.trainable_vqa)
+
         else:
             raise ValueError("Unrecognized cx_model {}".format(args.cx_model))
 
@@ -252,11 +294,12 @@ def main():
     if args.pairwise:
         print('==> Pairwise training')
 
+    epoch = None
     for epoch in range(start_epoch, options['optim']['epochs'] + 1):
 
         cx_model.train()
         if vqa_model is not None:
-            if args.trainable_vqa:
+            if options['cx_model']['trainable_vqa']:
                 vqa_model.train()
             else:
                 vqa_model.eval()
@@ -270,7 +313,7 @@ def main():
         for batch in tqdm(trainset_batched):
             assert(cx_model.training)
             if vqa_model is not None:
-                if args.trainable_vqa:
+                if options['cx_model']['trainable_vqa']:
                     assert(vqa_model.training)
                 else:
                     assert(not vqa_model.training)
@@ -326,10 +369,24 @@ def main():
 
         save_cx_checkpoint(cx_model, info, save_dir, is_best=is_best)
 
-    # eval_results = eval_model(cx_model, valset, features_val, options['optim']['batch_size'], pairwise=args.pairwise)
-    # log_results(val_writer, mode='val', epoch=0, i=0, metrics=eval_results)
-    visualize_results(cx_model, valset, features_val, 64,
-                      options['coco']['path_val_raw'], viz_dir)
+    if args.test or args.viz:
+        if epoch is not None:
+            _, best_epoch, _ = load_cx_checkpoint(cx_model, save_dir, resume_best=True)
+        else:
+            best_epoch = 0
+
+    if args.test:
+        test_results = eval_model(cx_model, testset, features_val, options['optim']['batch_size'], pairwise=args.pairwise)
+        test_results['best_epoch'] = best_epoch
+        with open(os.path.join(save_dir, 'final_results.txt'), 'w') as outfile:
+            outstr = json.dumps(test_results)
+            outfile.write(outstr)
+        print('Saved results to {}'.format(save_dir))
+        print('FINAL RESULTS ON BEST EPOCH {}'.format(best_epoch), test_results)
+    if args.viz:
+        visualize_results(cx_model, valset, features_val, 64,
+                          options['coco']['path_val_raw'], viz_dir)
+
 
 
 def visualize_results(cx_model, valset, features_val, num_images, datadir, viz_dir):

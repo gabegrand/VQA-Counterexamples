@@ -44,6 +44,19 @@ model:
         dropout_hq: 0
     classif:
         dropout: 0.5
+cx_model:
+  name: 'neuralcx_300_2_all'
+  dim_h: 300
+  n_layers: 2
+  pretrained_emb: true
+  drop_p: 0.25
+  v_emb: true
+  v_mult: true
+  v_dist: true
+  v_rank: true
+  q_emb: true
+  a_emb: true
+  z_emb: true
 optim:
     lr: 0.0001
     batch_size: 64
