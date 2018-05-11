@@ -155,14 +155,15 @@ def main():
         # Tensorboard log directory
         log_dir = os.path.join(args.project_dir, 'runs', run_name)
 
-    viz_dir = os.path.join(args.project_dir, 'viz', 'cx', run_name)
-    print('viz_dir', viz_dir, run_name)
-    if os.path.isdir(viz_dir):
-        if click.confirm('Viz directory already exists in {}. Erase?'.format(viz_dir)):
-            os.system('rm -r ' + viz_dir)
-        else:
-            return
-    os.makedirs(viz_dir)
+    if args.viz:
+        viz_dir = os.path.join(args.project_dir, 'viz', 'cx', run_name)
+        print('viz_dir', viz_dir, run_name)
+        if os.path.isdir(viz_dir):
+            if click.confirm('Viz directory already exists in {}. Erase?'.format(viz_dir)):
+                os.system('rm -r ' + viz_dir)
+            else:
+                return
+        os.makedirs(viz_dir)
 
     train_writer = SummaryWriter(log_dir=os.path.join(log_dir, 'train'))
     val_writer = SummaryWriter(log_dir=os.path.join(log_dir, 'val'))
@@ -176,15 +177,15 @@ def main():
 
     print('=> Loading VQA dataset...')
 
-    if options['optim']['epochs'] > 0:
-        if args.dev_mode:
-            trainset_fname = 'trainset_augmented_small.pickle'
-        else:
-            trainset_fname = 'trainset_augmented.pickle'
-        trainset = pickle.load(open(os.path.join(options['vqa']['path_trainset'], 'pickle_old', trainset_fname), 'rb'))
 
-        valset_fname = 'valset_augmented_small.pickle'
-        valset = pickle.load(open(os.path.join(options['vqa']['path_trainset'], 'pickle_old', valset_fname), 'rb'))
+    if args.dev_mode:
+        trainset_fname = 'trainset_augmented_small.pickle'
+    else:
+        trainset_fname = 'trainset_augmented.pickle'
+    trainset = pickle.load(open(os.path.join(options['vqa']['path_trainset'], 'pickle_old', trainset_fname), 'rb'))
+
+    valset_fname = 'valset_augmented_small.pickle'
+    valset = pickle.load(open(os.path.join(options['vqa']['path_trainset'], 'pickle_old', valset_fname), 'rb'))
 
     if args.test:
         testset_fname = 'valset_augmented.pickle'
@@ -245,7 +246,6 @@ def main():
             cx_model.set_answer_embedding(emb)
         elif args.cx_model == "NeuralModel":
             model_spec = options['cx_model']
-            print(model_spec)
 
             if model_spec['pretrained_emb']:
                 emb = pickle.load(open(os.path.join(options['vqa']['path_trainset'], "answer_embedding.pickle"), 'rb'))
@@ -385,7 +385,7 @@ def main():
         print('Saved results to {}'.format(save_dir))
         print('FINAL RESULTS ON BEST EPOCH {}'.format(best_epoch), test_results)
     if args.viz:
-        visualize_results(cx_model, valset, features_val, 64,
+        visualize_results(cx_model, valset, features_val, 200,
                           options['coco']['path_val_raw'], viz_dir)
 
 
@@ -399,7 +399,7 @@ def visualize_results(cx_model, valset, features_val, num_images, datadir, viz_d
     cx_model.knn_size = 24
     image_features, question_wids, answer_aids, comp_idxs = getDataFromBatch(
         batch, features_val, valset['name_to_index'], pairwise=False)
-    a_orig, z_orig, a_knns, z_knns = cx_model.vqa_forward(
+    a_orig, z_orig, a_knns, z_knns, _ = cx_model.vqa_forward(
         image_features, question_wids)
     scores = cx_model(image_features, question_wids, answer_aids).cpu().data.numpy()
     for i, (ex, a, knn, score) in tqdm(enumerate(zip(batch, a_orig, a_knns, scores))):
@@ -409,20 +409,43 @@ def visualize_results(cx_model, valset, features_val, num_images, datadir, viz_d
         answer = ex['answer']
         comp = ex['comp']['image_name']
         comp_answer = ex['comp']['answer']
-        _, a_knns_idx = knn.max(dim=1)
-        a_knns_idx = a_knns_idx.cpu().data.numpy()
-        a_knns_words = [valset['vocab_answers'][w] for w in a_knns_idx]
-        score_knns = sorted(list(zip(score, knns, a_knns_words)), reverse=True)
+        a_knns_scores = []
+        a_knns_idx = []
+        for j in range(24):
+            j_a_knns_scores, j_a_knns_idx = knn[j].topk(3)
+            j_a_knns_idx = j_a_knns_idx.cpu().data.numpy()
+            j_a_knns_scores = j_a_knns_scores.cpu().data.numpy()
+            a_knns_scores.append(j_a_knns_scores)
+            a_knns_idx.append(j_a_knns_idx)
+        # print(list(zip(a_knns_idx, a_knns_scores)))
+        a_knns_ws = []
+        # print(list(zip(a_knns_idx, a_knns_scores)))
+        for idx, knn_score in zip(a_knns_idx, a_knns_scores):
+            sublist = []
+            for k in range(len(idx)):
+                # print('k = ', k)
+                # print("appending:", (valset['vocab_answers'][idx[k]], score[k]))
+                sublist.append((valset['vocab_answers'][idx[k]], knn_score[k]))
+            a_knns_ws.append(sublist)
+        # print('len:', len(a_knns_ws))
+        # print('a_knns_ws', a_knns_ws)
+        # a_knns_ws = [[(valset['vocab_answers'][w[0]],w[1])  for w in idxs] for idxs in zip(a_knns_idx, a_knns_scores)]
+        # print(len(score), len(knns), len(a_knns_ws))
+        score_knns = sorted(list(zip(score, knns, a_knns_ws)), reverse=True)
+        # print('sorted', score_knns)
 
         knns = [sk[1] for sk in score_knns]
-        a_knns_words = [sk[2] for sk in score_knns]
+        a_knns_ws = [sk[2] for sk in score_knns]
+        # print(knns, a_knns_ws)
         try:
             viz_knns(datadir, img_name, knns, comp, question, answer,
                      24, outfile=os.path.join(viz_dir, 'viz_knns_' + str(i) + '.jpg'))
             viz_qa(datadir, img_name, knns, comp, question, answer, comp_answer,
-                   a_knns_words[:5], 5, outfile=os.path.join(viz_dir, 'viz_qa' + str(i) + '.jpg'))
-        except Exception as e:
-            continue
+                   a_knns_ws[:5], 5, outfile=os.path.join(viz_dir, 'viz_qa' + str(i) + '.jpg'))
+        except Exception:
+            pass
+        # except Exception as e:
+        #     continue
 
 def eval_model(cx_model, valset, features_val, batch_size, pairwise=False):
     cx_model.eval()
@@ -554,7 +577,7 @@ def load_cx_checkpoint(cx_model, save_dir, resume_best=True):
     last_epoch = len(info)
     print('Epoch {}: {}'.format(last_epoch, info[-1]))
 
-    return info, last_epoch + 1, info[-1]['recall']
+    return info, last_epoch + 1, info[-1]['recall_5']
 
 
 def check_grad(cx_model):
