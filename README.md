@@ -1,5 +1,8 @@
 # Identifying Counterexamples in Visual Question Answering
 
+On the Flip Side: Identifying Counterexamples in Visual Question Answering. Grand, G., Szanto, A., Kim, Y., & Rush, A. (2018). Presented at KDD ’18 Deep Learning Day, Aug. 2018, London, UK. 
+[arXiv:1806.00857](https://arxiv.org/abs/1806.00857)
+
 ## Abstract
 
 Visual question answering (VQA) models respond to open-ended natural language questions about images. While VQA is an increasingly popular area of research, it is unclear to what extent current VQA architectures learn key semantic distinctions between visually-similar images. To investigate this question, we explore a reformulation of the VQA task that challenges models to identify counterexamples: images that result in a different answer to the original question. We introduce two plug-and-play methods for evaluating existing VQA models against a supervised counterexample prediction task, VQA-CX. While our models surpass existing benchmarks on VQA-CX, we find that the multimodal representations learned by an existing state-of-the-art VQA model contribute only marginally to performance on this task. These results call into question the assumption that successful performance on the VQA benchmark is indicative of general visual-semantic reasoning abilities.
