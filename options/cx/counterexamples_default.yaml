@@ -1,8 +1,8 @@
 logs:
-    dir_logs: /datadrive/vqa.pytorch/logs/vqa2/mutan_noatt_train
+    dir_logs: logs/vqa2/mutan_noatt_train
 vqa:
     dataset: VQA2
-    dir: /datadrive/vqa.pytorch/data/vqa2
+    dir: data/vqa2
     trainsplit: train
     nans: 2000
     maxlength: 26
@@ -10,20 +10,20 @@ vqa:
     nlp: mcb
     pad: right
     samplingans: True
-    path_trainset: '/datadrive/vqa.pytorch/data/vqa2/processed/nans,2000_maxlength,26_minwcount,0_nlp,mcb_pad,right_trainsplit,train/'
-    path_comp_pairs: '/datadrive/vqa.pytorch/data/vqa2/raw/annotations/v2_mscoco_train2014_complementary_pairs.json'
+    path_trainset: 'data/vqa2/processed/nans,2000_maxlength,26_minwcount,0_nlp,mcb_pad,right_trainsplit,train/'
+    path_comp_pairs: 'data/vqa2/raw/annotations/v2_mscoco_train2014_complementary_pairs.json'
 coco:
     dir: data/coco
     arch: fbresnet152
     mode: noatt
     size: 448
-    path_raw: '/datadrive/vqa.pytorch/data/coco/extract/arch,fbresnet152_size,448/'
-    path_knn: '/datadrive/vqa.pytorch/data/coco/knn/mscoco_train2014_nn_images.json'
+    path_raw: 'data/coco/extract/arch,fbresnet152_size,448/'
+    path_knn: 'data/coco/knn/mscoco_train2014_nn_images.json'
 model:
     arch: MutanNoAtt
     seq2vec:
         arch: skipthoughts
-        dir_st: /datadrive/vqa.pytorch/data/skip-thoughts
+        dir_st: data/skip-thoughts
         type: BayesianUniSkip
         dropout: 0.25
         fixed_emb: False
